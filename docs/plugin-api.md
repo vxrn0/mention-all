@@ -28,6 +28,11 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
   Java field: build a `java.util.ArrayList`.
 - **Offsets are UTF-16.** Telegram counts entity offsets and lengths in UTF-16
   code units, not characters: `len(s.encode("utf-16-le")) // 2`.
+- **TL field types are not interchangeable.** `channels.getParticipants`
+  takes `TL_inputChannel`, not `TL_inputPeerChannel`: the `channel` field is
+  `InputChannel`, and `TL_inputPeerChannel` is an `InputPeer` — Chaquopy
+  throws `TypeError: Cannot convert ...` at request build time, killing the
+  whole send. Check the declared field type in TLRPC before assigning.
 - **Reentrancy.** A resend passes through the same outgoing hook. Strip the
   trigger token from any text you splice in, or the send loops forever.
 - **Async only.** The hook runs synchronously on the send path; anything
