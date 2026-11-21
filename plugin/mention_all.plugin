@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -223,7 +223,7 @@ class MentionAllPlugin(BasePlugin):
     def _supergroup_members(self, account: int, chat_id: int, access_hash: int,
                             limit: int, on_done, offset: int = 0,
                             collected: Optional[list] = None):
-        from client_utils import send_request
+        from client_utils import get_messages_controller, send_request
         from org.telegram.tgnet import TLRPC
 
         if collected is None:
@@ -248,7 +248,18 @@ class MentionAllPlugin(BasePlugin):
                     on_done(collected, "getParticipants: %s"
                             % (_error_text(error) or "пустой ответ"))
                     return
-                users = _jlist(response.users)
+                fetched = {}
+                for user in _jlist(response.users):
+                    fetched[int(user.id)] = user
+                # из клиентского кэша: он же кормит меню упоминаний, и юзернеймы
+                # там есть всегда; в ответе getParticipants они бывают пусты
+                mc = get_messages_controller(account)
+                users = []
+                for participant in _jlist(response.participants):
+                    uid = int(participant.user_id)
+                    user = mc.getUser(uid) or fetched.get(uid)
+                    if user is not None:
+                        users.append(user)
                 collected.extend(users)
                 got = response.participants.size()
                 if got < batch or len(collected) >= limit:
@@ -295,23 +306,21 @@ class MentionAllPlugin(BasePlugin):
                 self._fail(account, params, "некого упоминать (только вы, "
                            "боты и удалённые)", field, text)
                 return
-            # @username сервер распознаёт сам; entity нужен только тем,
-            # у кого юзернейма нет — text_mention по user_id
+            # entities обоих видов строим сами: @username — mention,
+            # без юзернейма — mentionName по user_id
             entities = ArrayList()
             for offset, length, uid, uname in spans:
                 if uname:
-                    continue
-                entity = TLRPC.TL_messageEntityMentionName()
+                    entity = TLRPC.TL_messageEntityMention()
+                else:
+                    entity = TLRPC.TL_messageEntityMentionName()
+                    entity.user_id = int(uid)
                 entity.offset = int(offset)
                 entity.length = int(length)
-                entity.user_id = int(uid)
                 entities.add(entity)
-            setattr(params, field, new_text)
-            if entities.size() > 0:
-                params.entities = entities
             self.log("mention-all: %d mentions, message length %d"
                      % (len(spans), utf16len(new_text)))
-            self._resend(account, params)
+            self._resend(account, params, field, new_text, entities)
         except Exception as exc:
             self._fail(account, params, "сборка упоминаний: %r" % (exc,),
                        field, text)
@@ -332,12 +341,38 @@ class MentionAllPlugin(BasePlugin):
                 setattr(params, field, stripped)
         self._resend(account, params)  # не теряем сообщение пользователя
 
-    def _resend(self, account: int, params: Any):
+    def _resend(self, account: int, params: Any, field: Optional[str] = None,
+                text: Optional[str] = None, entities: Any = None):
+        """Переотправка. Для текста — публичный перегруз sendMessage, каким
+        ходит сам ChatActivity: entities уходят Java-аргументом, надёжнее,
+        чем присваивание поля чужого params (на нём entities и терялись)."""
         from android_utils import run_on_ui_thread
         from client_utils import get_send_messages_helper
 
-        run_on_ui_thread(
-            lambda: get_send_messages_helper(account).sendMessage(params))
+        helper = get_send_messages_helper(account)
+
+        if field == "message" and text is not None:
+            def go():
+                helper.sendMessage(
+                    text, params.peer,
+                    params.replyToMsg, params.replyToTopMsg,
+                    params.webPage, bool(params.searchLinks),
+                    entities if entities is not None and entities.size() > 0
+                    else None,
+                    params.replyMarkup, params.params, bool(params.notify),
+                    int(params.scheduleDate), int(params.scheduleRepeatPeriod),
+                    None, False)
+        else:
+            # сбой/подпись: сообщение как напечатано (или подпись к медиа —
+            # shortcut: entities в подписи не гарантированы, лечить по факту)
+            def go():
+                if field is not None and text is not None:
+                    setattr(params, field, text)
+                    if entities is not None and entities.size() > 0:
+                        params.entities = entities
+                helper.sendMessage(params)
+
+        run_on_ui_thread(go)
 
     def _alert(self, title: str, message: str):
         """Диалог: не исчезает сам, текст можно прочитать и снять скриншот."""
