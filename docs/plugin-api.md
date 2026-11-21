@@ -22,10 +22,14 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
   `get_*_controller` / `send_*` helper.
 - **Mention entities.** The SDK markdown dialect has no `mention:` links and no
   text mentions. To ping a user without a username, build
-  `TLRPC.TL_messageEntityMentionName` yourself (`offset`, `length`, `user_id`)
-  and attach the list to `params.entities` — `SendMessagesHelper` carries that
-  field into the TL request. Chaquopy does not convert a Python list into the
-  Java field: build a `java.util.ArrayList`.
+  `TLRPC.TL_messageEntityMentionName` yourself (`offset`, `length`, `user_id`);
+  for `@username` spans build `TL_messageEntityMention`. Send them through the
+  public `sendMessage(message, peer, ..., entities, ...)` overload of
+  `SendMessagesHelper` — the one ChatActivity itself uses. Mutating
+  `SendMessageParams.entities` on a hook's params object silently loses the
+  entities on some builds; the overload passes them as a Java argument and
+  is reliable. Chaquopy does not convert a Python list into the Java
+  parameter: build a `java.util.ArrayList`.
 - **Offsets are UTF-16.** Telegram counts entity offsets and lengths in UTF-16
   code units, not characters: `len(s.encode("utf-16-le")) // 2`.
 - **TL field types are not interchangeable.** `channels.getParticipants`
