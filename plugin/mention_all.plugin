@@ -13,17 +13,18 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
 __permissions__ = ["messages.send", "network"]
 
 import re
+import time
 from typing import Any, List, Optional, Tuple
 
 from base_plugin import BasePlugin, HookResult, HookStrategy
-from ui.settings import Header, Input, Switch
+from ui.settings import Header, Input, Switch, Text
 
 # @all отдельным словом, не внутри @username и не @@all
 TOKEN_RE = re.compile(r"(?<![\w@])@all(?!\w)", re.IGNORECASE)
@@ -31,6 +32,9 @@ TOKEN_RE = re.compile(r"(?<![\w@])@all(?!\w)", re.IGNORECASE)
 TOKEN_CLEAN = re.compile(r"\s?(?<![\w@])@all(?!\w)", re.IGNORECASE)
 
 SUPERGROUP_FLAG = -1000000000000
+
+# сколько секунд после сбоя не пытаться снова на том же тексте
+_FAIL_TTL = 60.0
 
 
 def utf16len(s: str) -> int:
@@ -77,6 +81,9 @@ def _error_text(error) -> str:
 
 
 class MentionAllPlugin(BasePlugin):
+    # (peer, текст) -> время сбоя; класс, а не экземпляр: защёлка должна
+    # переживать перезагрузку плагина в живом процессе
+    _recent_fail = {}
     def on_plugin_load(self):
         self.add_on_send_message_hook()
         self.log("mention-all loaded, hook registered")
@@ -87,7 +94,34 @@ class MentionAllPlugin(BasePlugin):
             Switch(key="enabled", text="Включить", default=True),
             Input(key="limit", text="Максимум упоминаний", default="100",
                   subtext="Ограничение на размер одного сообщения"),
+            Text(text="Самопроверка",
+                 subtext="Проверяет классы Telegram и разрешения плагина",
+                 on_click=self._self_test),
         ]
+
+    def _self_test(self):
+        """Диагностика в один клик: называет сломанный шаг."""
+        checks = []
+        try:
+            from org.telegram.tgnet import TLRPC  # noqa: F401
+            checks.append("классы Telegram: ок")
+        except Exception as exc:
+            checks.append("классы Telegram: %s" % (exc,))
+        try:
+            from client_utils import _require
+            _require("messages.send", "self-test")
+            checks.append("messages.send: ок")
+        except Exception as exc:
+            checks.append("messages.send: %s" % (exc,))
+        try:
+            from client_utils import _require
+            _require("network", "self-test")
+            checks.append("network: ок")
+        except Exception as exc:
+            checks.append("network: %s" % (exc,))
+        report = "; ".join(checks)
+        self.log("self-test: " + report)
+        self._note("Mention All: " + report, error=False)
 
     def _limit(self) -> int:
         try:
@@ -107,6 +141,11 @@ class MentionAllPlugin(BasePlugin):
         text = str(getattr(params, field))
         if not TOKEN_RE.search(text):
             return None
+        # уже падали на этом тексте — отправляем как напечатано, без цикла
+        key = (int(params.peer), text)
+        ts = self._recent_fail.get(key)
+        if ts is not None and time.monotonic() - ts < _FAIL_TTL:
+            return None
         # Отменяем отправку и собираем участников асинхронно:
         # список участников приходит из сети, синхронно его не получить
         self._mention_all(account, params, field, text)
@@ -124,7 +163,8 @@ class MentionAllPlugin(BasePlugin):
             chat = get_messages_controller(account).getChat(chat_id) if chat_id else None
             if chat is None:
                 self._fail(account, params,
-                           "чат не найден (peer=%s, chat_id=%s)" % (peer, chat_id))
+                           "чат не найден (peer=%s, chat_id=%s)" % (peer, chat_id),
+                           field, text)
                 return
             self.log("mention-all: peer=%s chat_id=%s supergroup=%s"
                      % (peer, chat_id, bool(chat.megagroup or chat.gigagroup)))
@@ -155,7 +195,7 @@ class MentionAllPlugin(BasePlugin):
 
                 send_request(req, full_done, account=account)
         except Exception as exc:
-            self._fail(account, params, "ошибка запуска: %r" % (exc,))
+            self._fail(account, params, "ошибка запуска: %r" % (exc,), field, text)
 
     def _supergroup_members(self, account: int, chat_id: int, access_hash: int,
                             limit: int, on_done, offset: int = 0,
@@ -206,7 +246,7 @@ class MentionAllPlugin(BasePlugin):
                 users, error):
         if error is not None or not users:
             self._fail(account, params, "не получить список участников (%s)"
-                       % (_error_text(error) or "пусто"))
+                       % (_error_text(error) or "пусто"), field, text)
             return
 
         from java.util import ArrayList
@@ -227,7 +267,7 @@ class MentionAllPlugin(BasePlugin):
             new_text, spans = build_mentions(text, names, self._limit())
             if not spans:
                 self._fail(account, params, "некого упоминать (только вы, "
-                           "боты и удалённые)")
+                           "боты и удалённые)", field, text)
                 return
             entities = ArrayList()
             for offset, length, uid in spans:
@@ -244,12 +284,21 @@ class MentionAllPlugin(BasePlugin):
                        error=False)
             self._resend(account, params)
         except Exception as exc:
-            self._fail(account, params, "сборка упоминаний: %r" % (exc,))
+            self._fail(account, params, "сборка упоминаний: %r" % (exc,),
+                       field, text)
 
-    def _fail(self, account: int, params: Any, reason: str):
-        """Сбой: показать причину и отправить сообщение как напечатано."""
+    def _fail(self, account: int, params: Any, reason: str,
+              field: Optional[str] = None, text: Optional[str] = None):
+        """Сбой: показать причину один раз и отправить без повторного входа."""
         self.log("mention-all FAIL: " + reason)
         self._note("Mention All: " + reason)
+        if field is not None and text is not None:
+            # защёлка + вырезанный триггер: повторный хук не должен снова
+            # уйти в тот же сбой (1.0.1 циклил тут бесконечными бюллетенями)
+            self._recent_fail[(int(params.peer), text)] = time.monotonic()
+            stripped = TOKEN_CLEAN.sub("", text).strip()
+            if stripped:
+                setattr(params, field, stripped)
         self._resend(account, params)  # не теряем сообщение пользователя
 
     def _resend(self, account: int, params: Any):
