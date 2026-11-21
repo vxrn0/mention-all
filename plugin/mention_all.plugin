@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -213,7 +213,9 @@ class MentionAllPlugin(BasePlugin):
             on_done(collected, None)
             return
         req = TLRPC.TL_channels_getParticipants()
-        req.channel = TLRPC.TL_inputPeerChannel()
+        # поле channel ждёт InputChannel; TL_inputPeerChannel — это InputPeer
+        # и не конвертируется (ошибка 1.0.3 на устройстве)
+        req.channel = TLRPC.TL_inputChannel()
         req.channel.channel_id = int(chat_id)
         req.channel.access_hash = access_hash
         req.filter = TLRPC.TL_channelParticipantsRecent()
