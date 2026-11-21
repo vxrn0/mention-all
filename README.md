@@ -11,6 +11,8 @@ a username, via text-mention entities. Telegram itself has no such feature.
 - `@all` as a standalone word, case-insensitive; `@allxxx` and `@@all` are
   left alone.
 - Works in basic groups and supergroups, in message text and media captions.
+- Members with a username are mentioned as `@username`; the rest get a
+  text mention on their name.
 - Skips you, bots and deleted accounts.
 - Adjustable mention cap (default 100) for large groups.
 - If the member list cannot be fetched, your message is sent as typed —
@@ -22,7 +24,7 @@ a username, via text-mention entities. Telegram itself has no such feature.
 - Plugin SDK `>= 1.4.5.3`
 - Permissions: `messages.send` (outgoing-message hook, resend), `network`
   (TL request for the member list)
-- Version `1.0.5`
+- Version `1.1.0`
 
 ## Install
 
