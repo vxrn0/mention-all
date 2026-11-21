@@ -59,34 +59,36 @@ build = mod.build_mentions
 chat_id = mod.chat_id_from_dialog
 
 # ---- build_mentions ----
-
-text, spans = build("hi @all, wake up", [(1, "Ann"), (2, "Bob")], 100)
-assert text == "hi Ann Bob, wake up", text
-assert spans == [(3, 3, 1), (7, 3, 2)], spans  # utf16 offsets по словам
+# участники: (user_id, username|None, имя)
+text, spans = build("hi @all, wake up",
+                    [(1, "ann_x", "Ann"), (2, None, "Bob")], 100)
+assert text == "hi @ann_x Bob, wake up", text
+# юзернеймованные пишутся как @username, остальные — именем
+assert spans == [(3, 6, 1, "ann_x"), (10, 3, 2, None)], spans
 
 # повторные токены убираются
-text, spans = build("@all @all", [(5, "X")], 100)
-assert text == "X", repr(text)
+text, spans = build("@all @all", [(5, "x_user", "X")], 100)
+assert text == "@x_user", repr(text)
 
 # utf-16: emoji до токена занимает 2 кодовые единицы
-text, spans = build("\U0001F44B @all", [(9, "Z")], 100)
-assert spans == [(3, 1, 9)], spans
+text, spans = build("\U0001F44B @all", [(9, None, "Z")], 100)
+assert spans == [(3, 1, 9, None)], spans
 
 # лимит
-text, spans = build("@all", [(i, f"u{i}") for i in range(10)], 3)
-assert text == "u0 u1 u2" and len(spans) == 3
+text, spans = build("@all", [(i, "u%d" % i, "") for i in range(10)], 3)
+assert text == "@u0 @u1 @u2" and len(spans) == 3
 
 # пустой список участников / без токена — текст не меняется
-assert build("no token here", [(1, "A")], 100)[0] == "no token here"
+assert build("no token here", [(1, "a_u", "A")], 100)[0] == "no token here"
 assert build("@all", [], 100) == ("@all", [])
 
 # имя, содержащее @all, не зациклит повторный хук
-text, spans = build("@all", [(1, "@all fan")], 100)
-assert text == "fan" and spans == [(0, 3, 1)]
+text, spans = build("@all", [(1, None, "@all fan")], 100)
+assert text == "fan" and spans == [(0, 3, 1, None)]
 
 # регистр и защита от @allinside / @@all
-assert build("пишите @ALL", [(1, "A")], 100)[0] == "пишите A"
-assert build("@allinside", [(1, "A")], 100)[0] == "@allinside"
+assert build("пишите @ALL", [(1, "a_u", "A")], 100)[0] == "пишите @a_u"
+assert build("@allinside", [(1, "a_u", "A")], 100)[0] == "@allinside"
 
 # ---- chat_id_from_dialog ----
 

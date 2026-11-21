@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.0.5"
+__version__ = "1.1.0"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -51,25 +51,34 @@ def chat_id_from_dialog(dialog_id: int) -> Optional[int]:
     return None
 
 
-def build_mentions(text: str, names: List[Tuple[int, str]],
-                   limit: int) -> Tuple[str, List[Tuple[int, int, int]]]:
-    """Заменить первый @all на имена участников, остальные токены убрать.
+def build_mentions(text: str, members: List[Tuple[int, Optional[str], str]],
+                   limit: int) -> Tuple[str, List[Tuple[int, int, int, Optional[str]]]]:
+    """Заменить первый @all на упоминания участников, остальные токены убрать.
 
-    Возвращает (новый_текст, [(offset_utf16, length_utf16, user_id), ...]).
+    members: [(user_id, username|None, имя)]. Участник с юзернеймом пишется
+    как @username (сервер распознаёт упоминание сам), без юзернейма — именем
+    (для него вызывающий строит text_mention).
+
+    Возвращает (новый_текст, [(offset_utf16, length_utf16, user_id,
+    username|None), ...]).
     """
     match = TOKEN_RE.search(text)
-    if match is None or not names:
+    if match is None or not members:
         return text, []
     # имя может содержать @all — вырезаем, иначе повторный хук зациклит отправку
-    names = [(uid, TOKEN_CLEAN.sub("", name).strip() or "User")
-             for uid, name in names[:max(0, limit)]]
-    block = " ".join(name for _, name in names)
-    new_text = text[:match.start()] + block + TOKEN_CLEAN.sub("", text[match.end():])
+    picked = [(uid, (uname or "").strip(),
+               TOKEN_CLEAN.sub("", name).strip() or "User")
+              for uid, uname, name in members[:max(0, limit)]]
+    pieces = []
     spans = []
     pos = utf16len(text[:match.start()])
-    for uid, name in names:
-        spans.append((pos, utf16len(name), uid))
-        pos += utf16len(name) + 1  # разделительный пробел
+    for uid, uname, name in picked:
+        span = ("@" + uname) if uname else name
+        pieces.append(span)
+        spans.append((pos, utf16len(span), uid, uname or None))
+        pos += utf16len(span) + 1  # разделительный пробел
+    new_text = text[:match.start()] + " ".join(pieces) \
+        + TOKEN_CLEAN.sub("", text[match.end():])
     return new_text, spans
 
 
@@ -271,33 +280,37 @@ class MentionAllPlugin(BasePlugin):
 
         try:
             me = get_user_config(account).getClientUserId()
-            names = []
+            members = []
             for user in users:
                 # без себя, ботов и удалённых — их упоминание не имеет смысла
                 if user.id == me or user.bot or user.deleted:
                     continue
                 name = (user.first_name or "") + \
                     ((" " + user.last_name) if user.last_name else "")
-                names.append((int(user.id), name.strip()))
+                members.append((int(user.id),
+                                (user.username or "").strip(), name.strip()))
 
-            new_text, spans = build_mentions(text, names, self._limit())
+            new_text, spans = build_mentions(text, members, self._limit())
             if not spans:
                 self._fail(account, params, "некого упоминать (только вы, "
                            "боты и удалённые)", field, text)
                 return
+            # @username сервер распознаёт сам; entity нужен только тем,
+            # у кого юзернейма нет — text_mention по user_id
             entities = ArrayList()
-            for offset, length, uid in spans:
+            for offset, length, uid, uname in spans:
+                if uname:
+                    continue
                 entity = TLRPC.TL_messageEntityMentionName()
                 entity.offset = int(offset)
                 entity.length = int(length)
                 entity.user_id = int(uid)
                 entities.add(entity)
             setattr(params, field, new_text)
-            params.entities = entities
+            if entities.size() > 0:
+                params.entities = entities
             self.log("mention-all: %d mentions, message length %d"
                      % (len(spans), utf16len(new_text)))
-            self._note("Mention All: отмечено %d участников" % len(spans),
-                       error=False)
             self._resend(account, params)
         except Exception as exc:
             self._fail(account, params, "сборка упоминаний: %r" % (exc,),
@@ -325,16 +338,6 @@ class MentionAllPlugin(BasePlugin):
 
         run_on_ui_thread(
             lambda: get_send_messages_helper(account).sendMessage(params))
-
-    def _note(self, message: str, error: bool = True):
-        try:
-            from ui.bulletin import BulletinHelper
-            if error:
-                BulletinHelper.show_error(message)
-            else:
-                BulletinHelper.show_info(message)
-        except Exception:
-            self.log("bulletin failed: " + message)
 
     def _alert(self, title: str, message: str):
         """Диалог: не исчезает сам, текст можно прочитать и снять скриншот."""
