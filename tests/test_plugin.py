@@ -95,6 +95,23 @@ assert chat_id(-1000000000123) == 123  # супергруппа
 assert chat_id(12345) is None          # личка
 assert chat_id(0) is None
 
+# ---- _jlist: Java-список читается по индексу, None не роняет ----
+
+
+class FakeJavaList:
+    def __init__(self, *items):
+        self._items = list(items)
+
+    def size(self):
+        return len(self._items)
+
+    def get(self, i):
+        return self._items[i]
+
+
+assert mod._jlist(FakeJavaList(1, 2, 3)) == [1, 2, 3]
+assert mod._jlist(None) == []
+
 # ---- маршрутизация хука (до Java-кода) ----
 
 
