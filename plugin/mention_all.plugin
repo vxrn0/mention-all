@@ -1,0 +1,226 @@
+# Mention All — плагин exteraless / exteraGram
+#
+# Заменяет @all в вашем сообщении на упоминания всех участников группы
+# (text_mention: пингуется каждый, даже без юзернейма).
+#
+# Разрешения: messages.send (хук исходящих + повторная отправка),
+# network (TL-запрос списка участников).
+
+__id__ = "mention_all"
+__name__ = "Mention All"
+__description__ = "Пишете @all в группе — плагин отмечает всех её участников"
+__author__ = "@vxrn0"
+__version__ = "1.0.0"
+__category__ = "chats"
+__app_version__ = ">=12.10.6"
+__sdk_version__ = ">=1.4.5.3"
+__permissions__ = ["messages.send", "network"]
+
+import re
+from typing import Any, List, Optional, Tuple
+
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.settings import Header, Input, Switch
+
+# @all отдельным словом, не внутри @username и не @@all
+TOKEN_RE = re.compile(r"(?<![\w@])@all(?!\w)", re.IGNORECASE)
+# уборка повторных токенов: съедает и пробел перед ними, чтобы не плодить дыры
+TOKEN_CLEAN = re.compile(r"\s?(?<![\w@])@all(?!\w)", re.IGNORECASE)
+
+SUPERGROUP_FLAG = -1000000000000
+
+
+def utf16len(s: str) -> int:
+    # Telegram считает offsets в кодовых единицах UTF-16
+    return len(s.encode("utf-16-le")) // 2
+
+
+def chat_id_from_dialog(dialog_id: int) -> Optional[int]:
+    """dialog_id -> id чата; None для личок и каналов-без-переписки."""
+    if SUPERGROUP_FLAG < dialog_id < 0:
+        return -dialog_id  # базовая группа
+    if dialog_id <= SUPERGROUP_FLAG:
+        return -dialog_id + SUPERGROUP_FLAG  # супергруппа
+    return None
+
+
+def build_mentions(text: str, names: List[Tuple[int, str]],
+                   limit: int) -> Tuple[str, List[Tuple[int, int, int]]]:
+    """Заменить первый @all на имена участников, остальные токены убрать.
+
+    Возвращает (новый_текст, [(offset_utf16, length_utf16, user_id), ...]).
+    """
+    match = TOKEN_RE.search(text)
+    if match is None or not names:
+        return text, []
+    # имя может содержать @all — вырезаем, иначе повторный хук зациклит отправку
+    names = [(uid, TOKEN_RE.sub("", name).strip() or "User")
+             for uid, name in names[:max(0, limit)]]
+    block = " ".join(name for _, name in names)
+    new_text = text[:match.start()] + block + TOKEN_CLEAN.sub("", text[match.end():])
+    spans = []
+    pos = utf16len(text[:match.start()])
+    for uid, name in names:
+        spans.append((pos, utf16len(name), uid))
+        pos += utf16len(name) + 1  # разделительный пробел
+    return new_text, spans
+
+
+class MentionAllPlugin(BasePlugin):
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+
+    def create_settings(self) -> List[Any]:
+        return [
+            Header(text="Mention All"),
+            Switch(key="enabled", text="Включить", default=True),
+            Input(key="limit", text="Максимум упоминаний", default="100",
+                  subtext="Ограничение на размер одного сообщения"),
+        ]
+
+    def _limit(self) -> int:
+        try:
+            return max(0, int(self.get_setting("limit", "100")))
+        except (TypeError, ValueError):
+            return 100
+
+    # ---- хук исходящих ----
+
+    def on_send_message_hook(self, account: int, params: Any):
+        if not self.get_setting("enabled", True):
+            return None
+        # shortcut: только текст, только группы; медиа без подписи мимо
+        field = "message" if params.message else "caption" if params.caption else None
+        if field is None or int(params.peer) >= 0:
+            return None
+        text = str(getattr(params, field))
+        if not TOKEN_RE.search(text):
+            return None
+        # Отменяем отправку и собираем участников асинхронно:
+        # список участников приходит из сети, синхронно его не получить
+        self._mention_all(account, params, field, text)
+        return HookResult(strategy=HookStrategy.CANCEL)
+
+    # ---- сбор участников ----
+
+    def _mention_all(self, account: int, params: Any, field: str, text: str):
+        from client_utils import get_messages_controller, send_request
+        from org.telegram.tgnet import TLRPC
+
+        chat_id = chat_id_from_dialog(int(params.peer))
+        chat = get_messages_controller(account).getChat(chat_id) if chat_id else None
+        if chat is None:
+            self._finish(account, params, field, text, None, "чат не найден")
+            return
+
+        def done(users, error):
+            self._finish(account, params, field, text, users, error)
+
+        if chat.megagroup or chat.gigagroup:
+            self._supergroup_members(account, chat_id, chat.access_hash,
+                                     self._limit(), done)
+        else:
+            req = TLRPC.TL_messages_getFullChat()
+            req.chat_id = int(chat_id)
+            mc = get_messages_controller(account)
+
+            def full_done(response, error):
+                users = []
+                if error is None and response is not None:
+                    for p in response.full_chat.participants.participants:
+                        user = mc.getUser(p.user_id)
+                        if user is not None:
+                            users.append(user)
+                done(users, error if error is not None
+                     else None if users else "участники не найдены")
+
+            send_request(req, full_done, account=account)
+
+    def _supergroup_members(self, account: int, chat_id: int, access_hash: int,
+                            limit: int, on_done, offset: int = 0,
+                            collected: Optional[list] = None):
+        from client_utils import send_request
+        from org.telegram.tgnet import TLRPC
+
+        if collected is None:
+            collected = []
+        batch = min(200, limit - len(collected))
+        if batch <= 0:
+            on_done(collected, None)
+            return
+        req = TLRPC.TL_channels_getParticipants()
+        req.channel = TLRPC.TL_inputPeerChannel()
+        req.channel.channel_id = int(chat_id)
+        req.channel.access_hash = access_hash
+        req.filter = TLRPC.TL_channelParticipantsRecent()
+        req.offset = int(offset)
+        req.limit = int(batch)
+
+        def page_done(response, error):
+            if error is not None or response is None:
+                on_done(collected, error or "пустой ответ")
+                return
+            users = list(response.users)
+            collected.extend(users)
+            got = response.participants.size()
+            if got < batch or len(collected) >= limit:
+                on_done(collected, None)
+            else:
+                self._supergroup_members(account, chat_id, access_hash,
+                                          limit, on_done, offset + got,
+                                          collected)
+
+        send_request(req, page_done, account=account)
+
+    # ---- сборка и повторная отправка ----
+
+    def _finish(self, account: int, params: Any, field: str, text: str,
+                users, error):
+        if error is not None or not users:
+            self._note("Mention All: не получить список участников"
+                       + (f" ({error})" if error and str(error) else ""))
+            self._resend(account, params)  # не теряем сообщение пользователя
+            return
+
+        from java.util import ArrayList
+        from client_utils import get_user_config
+        from org.telegram.tgnet import TLRPC
+
+        me = get_user_config(account).getClientUserId()
+        names = []
+        for user in users:
+            # без себя, ботов и удалённых — их упоминание не имеет смысла
+            if user.id == me or user.bot or user.deleted:
+                continue
+            name = (user.first_name or "") + \
+                ((" " + user.last_name) if user.last_name else "")
+            names.append((int(user.id), name.strip()))
+
+        new_text, spans = build_mentions(text, names, self._limit())
+        if not spans:
+            self._resend(account, params)
+            return
+        entities = ArrayList()
+        for offset, length, uid in spans:
+            entity = TLRPC.TL_messageEntityMentionName()
+            entity.offset = int(offset)
+            entity.length = int(length)
+            entity.user_id = int(uid)
+            entities.add(entity)
+        setattr(params, field, new_text)
+        params.entities = entities
+        self._resend(account, params)
+
+    def _resend(self, account: int, params: Any):
+        from android_utils import run_on_ui_thread
+        from client_utils import get_send_messages_helper
+
+        run_on_ui_thread(
+            lambda: get_send_messages_helper(account).sendMessage(params))
+
+    def _note(self, message: str):
+        try:
+            from ui.bulletin import BulletinHelper
+            BulletinHelper.show_error(message)
+        except Exception:
+            self.log(message)
