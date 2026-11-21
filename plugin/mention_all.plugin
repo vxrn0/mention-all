@@ -5,12 +5,15 @@
 #
 # Разрешения: messages.send (хук исходящих + повторная отправка),
 # network (TL-запрос списка участников).
+#
+# Любой сбой показывается бюллетенем с именем шага — иначе молчаливый
+# отказ не отличить от «плагин не работает».
 
 __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -54,7 +57,7 @@ def build_mentions(text: str, names: List[Tuple[int, str]],
     if match is None or not names:
         return text, []
     # имя может содержать @all — вырезаем, иначе повторный хук зациклит отправку
-    names = [(uid, TOKEN_RE.sub("", name).strip() or "User")
+    names = [(uid, TOKEN_CLEAN.sub("", name).strip() or "User")
              for uid, name in names[:max(0, limit)]]
     block = " ".join(name for _, name in names)
     new_text = text[:match.start()] + block + TOKEN_CLEAN.sub("", text[match.end():])
@@ -66,9 +69,17 @@ def build_mentions(text: str, names: List[Tuple[int, str]],
     return new_text, spans
 
 
+def _error_text(error) -> str:
+    """TL_error или исключение — читаемая строка."""
+    if error is None:
+        return ""
+    return str(getattr(error, "text", None) or error)
+
+
 class MentionAllPlugin(BasePlugin):
     def on_plugin_load(self):
         self.add_on_send_message_hook()
+        self.log("mention-all loaded, hook registered")
 
     def create_settings(self) -> List[Any]:
         return [
@@ -107,34 +118,44 @@ class MentionAllPlugin(BasePlugin):
         from client_utils import get_messages_controller, send_request
         from org.telegram.tgnet import TLRPC
 
-        chat_id = chat_id_from_dialog(int(params.peer))
-        chat = get_messages_controller(account).getChat(chat_id) if chat_id else None
-        if chat is None:
-            self._finish(account, params, field, text, None, "чат не найден")
-            return
+        try:
+            peer = int(params.peer)
+            chat_id = chat_id_from_dialog(peer)
+            chat = get_messages_controller(account).getChat(chat_id) if chat_id else None
+            if chat is None:
+                self._fail(account, params,
+                           "чат не найден (peer=%s, chat_id=%s)" % (peer, chat_id))
+                return
+            self.log("mention-all: peer=%s chat_id=%s supergroup=%s"
+                     % (peer, chat_id, bool(chat.megagroup or chat.gigagroup)))
 
-        def done(users, error):
-            self._finish(account, params, field, text, users, error)
+            def done(users, error):
+                self._finish(account, params, field, text, users, error)
 
-        if chat.megagroup or chat.gigagroup:
-            self._supergroup_members(account, chat_id, chat.access_hash,
-                                     self._limit(), done)
-        else:
-            req = TLRPC.TL_messages_getFullChat()
-            req.chat_id = int(chat_id)
-            mc = get_messages_controller(account)
+            if chat.megagroup or chat.gigagroup:
+                self._supergroup_members(account, chat_id, chat.access_hash,
+                                         self._limit(), done)
+            else:
+                req = TLRPC.TL_messages_getFullChat()
+                req.chat_id = int(chat_id)
+                mc = get_messages_controller(account)
 
-            def full_done(response, error):
-                users = []
-                if error is None and response is not None:
-                    for p in response.full_chat.participants.participants:
-                        user = mc.getUser(p.user_id)
-                        if user is not None:
-                            users.append(user)
-                done(users, error if error is not None
-                     else None if users else "участники не найдены")
+                def full_done(response, error):
+                    try:
+                        users = []
+                        if error is None and response is not None:
+                            for p in response.full_chat.participants.participants:
+                                user = mc.getUser(p.user_id)
+                                if user is not None:
+                                    users.append(user)
+                        done(users, error if error is not None
+                             else None if users else "список участников пуст")
+                    except Exception as exc:
+                        done(None, "getFullChat: %r" % (exc,))
 
-            send_request(req, full_done, account=account)
+                send_request(req, full_done, account=account)
+        except Exception as exc:
+            self._fail(account, params, "ошибка запуска: %r" % (exc,))
 
     def _supergroup_members(self, account: int, chat_id: int, access_hash: int,
                             limit: int, on_done, offset: int = 0,
@@ -157,59 +178,79 @@ class MentionAllPlugin(BasePlugin):
         req.limit = int(batch)
 
         def page_done(response, error):
-            if error is not None or response is None:
-                on_done(collected, error or "пустой ответ")
-                return
-            users = list(response.users)
-            collected.extend(users)
-            got = response.participants.size()
-            if got < batch or len(collected) >= limit:
-                on_done(collected, None)
-            else:
-                self._supergroup_members(account, chat_id, access_hash,
-                                          limit, on_done, offset + got,
-                                          collected)
+            try:
+                if error is not None or response is None:
+                    on_done(collected, "getParticipants: %s"
+                            % (_error_text(error) or "пустой ответ"))
+                    return
+                users = list(response.users)
+                collected.extend(users)
+                got = response.participants.size()
+                if got < batch or len(collected) >= limit:
+                    on_done(collected, None)
+                else:
+                    self._supergroup_members(account, chat_id, access_hash,
+                                             limit, on_done, offset + got,
+                                             collected)
+            except Exception as exc:
+                on_done(collected, "getParticipants: %r" % (exc,))
 
-        send_request(req, page_done, account=account)
+        try:
+            send_request(req, page_done, account=account)
+        except Exception as exc:
+            on_done(collected, "getParticipants: %r" % (exc,))
 
     # ---- сборка и повторная отправка ----
 
     def _finish(self, account: int, params: Any, field: str, text: str,
                 users, error):
         if error is not None or not users:
-            self._note("Mention All: не получить список участников"
-                       + (f" ({error})" if error and str(error) else ""))
-            self._resend(account, params)  # не теряем сообщение пользователя
+            self._fail(account, params, "не получить список участников (%s)"
+                       % (_error_text(error) or "пусто"))
             return
 
         from java.util import ArrayList
         from client_utils import get_user_config
         from org.telegram.tgnet import TLRPC
 
-        me = get_user_config(account).getClientUserId()
-        names = []
-        for user in users:
-            # без себя, ботов и удалённых — их упоминание не имеет смысла
-            if user.id == me or user.bot or user.deleted:
-                continue
-            name = (user.first_name or "") + \
-                ((" " + user.last_name) if user.last_name else "")
-            names.append((int(user.id), name.strip()))
+        try:
+            me = get_user_config(account).getClientUserId()
+            names = []
+            for user in users:
+                # без себя, ботов и удалённых — их упоминание не имеет смысла
+                if user.id == me or user.bot or user.deleted:
+                    continue
+                name = (user.first_name or "") + \
+                    ((" " + user.last_name) if user.last_name else "")
+                names.append((int(user.id), name.strip()))
 
-        new_text, spans = build_mentions(text, names, self._limit())
-        if not spans:
+            new_text, spans = build_mentions(text, names, self._limit())
+            if not spans:
+                self._fail(account, params, "некого упоминать (только вы, "
+                           "боты и удалённые)")
+                return
+            entities = ArrayList()
+            for offset, length, uid in spans:
+                entity = TLRPC.TL_messageEntityMentionName()
+                entity.offset = int(offset)
+                entity.length = int(length)
+                entity.user_id = int(uid)
+                entities.add(entity)
+            setattr(params, field, new_text)
+            params.entities = entities
+            self.log("mention-all: %d mentions, message length %d"
+                     % (len(spans), utf16len(new_text)))
+            self._note("Mention All: отмечено %d участников" % len(spans),
+                       error=False)
             self._resend(account, params)
-            return
-        entities = ArrayList()
-        for offset, length, uid in spans:
-            entity = TLRPC.TL_messageEntityMentionName()
-            entity.offset = int(offset)
-            entity.length = int(length)
-            entity.user_id = int(uid)
-            entities.add(entity)
-        setattr(params, field, new_text)
-        params.entities = entities
-        self._resend(account, params)
+        except Exception as exc:
+            self._fail(account, params, "сборка упоминаний: %r" % (exc,))
+
+    def _fail(self, account: int, params: Any, reason: str):
+        """Сбой: показать причину и отправить сообщение как напечатано."""
+        self.log("mention-all FAIL: " + reason)
+        self._note("Mention All: " + reason)
+        self._resend(account, params)  # не теряем сообщение пользователя
 
     def _resend(self, account: int, params: Any):
         from android_utils import run_on_ui_thread
@@ -218,9 +259,12 @@ class MentionAllPlugin(BasePlugin):
         run_on_ui_thread(
             lambda: get_send_messages_helper(account).sendMessage(params))
 
-    def _note(self, message: str):
+    def _note(self, message: str, error: bool = True):
         try:
             from ui.bulletin import BulletinHelper
-            BulletinHelper.show_error(message)
+            if error:
+                BulletinHelper.show_error(message)
+            else:
+                BulletinHelper.show_info(message)
         except Exception:
-            self.log(message)
+            self.log("bulletin failed: " + message)
