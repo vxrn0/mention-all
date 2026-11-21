@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -101,6 +101,11 @@ class MentionAllPlugin(BasePlugin):
 
     def _self_test(self):
         """Диагностика в один клик: называет сломанный шаг."""
+        report = self._check_report()
+        self.log("self-test: " + report)
+        self._alert("Mention All: проверка", report)
+
+    def _check_report(self) -> str:
         checks = []
         try:
             from org.telegram.tgnet import TLRPC  # noqa: F401
@@ -119,9 +124,7 @@ class MentionAllPlugin(BasePlugin):
             checks.append("network: ок")
         except Exception as exc:
             checks.append("network: %s" % (exc,))
-        report = "; ".join(checks)
-        self.log("self-test: " + report)
-        self._note("Mention All: " + report, error=False)
+        return "\n".join(checks)
 
     def _limit(self) -> int:
         try:
@@ -291,7 +294,9 @@ class MentionAllPlugin(BasePlugin):
               field: Optional[str] = None, text: Optional[str] = None):
         """Сбой: показать причину один раз и отправить без повторного входа."""
         self.log("mention-all FAIL: " + reason)
-        self._note("Mention All: " + reason)
+        # диалог, а не бюллетень: остаётся на экране, пока пользователь не
+        # закроет — текст ошибки теперь реально можно прочитать
+        self._alert("Mention All", reason + "\n\n" + self._check_report())
         if field is not None and text is not None:
             # защёлка + вырезанный триггер: повторный хук не должен снова
             # уйти в тот же сбой (1.0.1 циклил тут бесконечными бюллетенями)
@@ -317,3 +322,15 @@ class MentionAllPlugin(BasePlugin):
                 BulletinHelper.show_info(message)
         except Exception:
             self.log("bulletin failed: " + message)
+
+    def _alert(self, title: str, message: str):
+        """Диалог: не исчезает сам, текст можно прочитать и снять скриншот."""
+        try:
+            from ui.alert import AlertDialogBuilder
+            builder = AlertDialogBuilder()
+            builder.set_title(title)
+            builder.set_message(message)
+            builder.set_positive_button("Ок")
+            builder.show()
+        except Exception as exc:
+            self.log("alert failed (%r): %s" % (exc, message))
