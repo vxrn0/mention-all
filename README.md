@@ -22,7 +22,7 @@ a username, via text-mention entities. Telegram itself has no such feature.
 - Plugin SDK `>= 1.4.5.3`
 - Permissions: `messages.send` (outgoing-message hook, resend), `network`
   (TL request for the member list)
-- Version `1.0.2`
+- Version `1.0.3`
 
 ## Install
 
