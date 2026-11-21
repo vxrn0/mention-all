@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -78,6 +78,17 @@ def _error_text(error) -> str:
     if error is None:
         return ""
     return str(getattr(error, "text", None) or error)
+
+
+def _jlist(java_list) -> list:
+    """Java-список в питоновский: итерация по прокси не работает
+    (TypeError 'ArrayList' object is not iterable), индексы — работают."""
+    out = []
+    if java_list is None:
+        return out
+    for i in range(java_list.size()):
+        out.append(java_list.get(i))
+    return out
 
 
 class MentionAllPlugin(BasePlugin):
@@ -187,7 +198,7 @@ class MentionAllPlugin(BasePlugin):
                     try:
                         users = []
                         if error is None and response is not None:
-                            for p in response.full_chat.participants.participants:
+                            for p in _jlist(response.full_chat.participants.participants):
                                 user = mc.getUser(p.user_id)
                                 if user is not None:
                                     users.append(user)
@@ -228,7 +239,7 @@ class MentionAllPlugin(BasePlugin):
                     on_done(collected, "getParticipants: %s"
                             % (_error_text(error) or "пустой ответ"))
                     return
-                users = list(response.users)
+                users = _jlist(response.users)
                 collected.extend(users)
                 got = response.participants.size()
                 if got < batch or len(collected) >= limit:
