@@ -5,6 +5,7 @@
 
 import importlib.util
 import sys
+import time
 import types
 from pathlib import Path
 from importlib.machinery import SourceFileLoader
@@ -119,5 +120,15 @@ assert seen and seen[0][0] == 7  # аккаунт протащен без иск
 
 res = plugin.on_send_message_hook(7, Params(-123, None, "cap @all"))
 assert res is not None and res.strategy == mod.HookStrategy.CANCEL  # подпись тоже работает
+
+# защёлка: после сбоя тот же текст уходит как есть, без повторного цикла
+p = Params(-123, "go @all")
+plugin._mention_all = lambda *a: seen.append(a)
+assert plugin.on_send_message_hook(7, p).strategy == mod.HookStrategy.CANCEL
+mod.MentionAllPlugin._recent_fail.clear()
+mod.MentionAllPlugin._recent_fail[(int(p.peer), "go @all")] = time.monotonic()
+seen.clear()
+assert plugin.on_send_message_hook(7, p) is None  # сбой запомнен — не отменяем
+assert not seen  # и даже не пытаемся собрать участников
 
 print("ok")
