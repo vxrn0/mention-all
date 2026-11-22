@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.1.4"
+__version__ = "1.1.5"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -97,6 +97,13 @@ def pick_members(entries: List[Tuple[int, str, str, bool]], me: int):
     if chosen:
         return [(uid, uname, name) for uid, uname, name, _ in chosen], False
     return [(uid, uname, name) for uid, uname, name, _ in entries], True
+
+
+def fallback_text(text: str) -> str:
+    """Текст для отправки после сбоя: без токена @all, но никогда не пустой —
+    пустой пузырь хуже, чем сообщение с токеном (баг 1.1.4)."""
+    stripped = TOKEN_CLEAN.sub("", text).strip()
+    return stripped or text
 
 
 def _error_text(error) -> str:
@@ -343,18 +350,22 @@ class MentionAllPlugin(BasePlugin):
                            "лимит %d" % (len(users), len(members), limit),
                            field, text, tag="no_members")
                 return
-            # entities обоих видов строим сами: @username — mention,
-            # без юзернейма — mentionName по user_id
+            # entities строим по одной: сбой на одной не должен унести текст
+            # (1.1.4 на устройстве: исключение здесь → _fail отправил params,
+            # а клиент к тому моменту уже очистил текст → пустое сообщение)
             entities = ArrayList()
             for offset, length, uid, uname in spans:
-                if uname:
-                    entity = TLRPC.TL_messageEntityMention()
-                else:
-                    entity = TLRPC.TL_messageEntityMentionName()
-                    entity.user_id = int(uid)
-                entity.offset = int(offset)
-                entity.length = int(length)
-                entities.add(entity)
+                try:
+                    if uname:
+                        entity = TLRPC.TL_messageEntityMention()
+                    else:
+                        entity = TLRPC.TL_messageEntityMentionName()
+                        entity.user_id = int(uid)
+                    entity.offset = int(offset)
+                    entity.length = int(length)
+                    entities.add(entity)
+                except Exception as exc:
+                    self._journal_tell("entity_skip %s" % (exc,))
             self.log("mention-all: %d mentions, message length %d"
                      % (len(spans), utf16len(new_text)))
             self._resend(account, params, field, new_text, entities)
@@ -376,10 +387,7 @@ class MentionAllPlugin(BasePlugin):
             # защёлка + вырезанный триггер: повторный хук не должен снова
             # уйти в тот же сбой (1.0.1 циклил тут бесконечными бюллетенями)
             self._recent_fail[(int(params.peer), text)] = time.monotonic()
-            stripped = TOKEN_CLEAN.sub("", text).strip()
-            if stripped:
-                setattr(params, field, stripped)
-        self._resend(account, params)  # не теряем сообщение пользователя
+        self._resend(account, params, field, text)  # не теряем сообщение
 
     def _journal_tell(self, text: str):
         """Причину сбоя — в журнал активности: его стабильно смотрят и
@@ -417,6 +425,7 @@ class MentionAllPlugin(BasePlugin):
                         params.replyMarkup, params.params, bool(params.notify),
                         int(params.scheduleDate), int(params.scheduleRepeatPeriod),
                         None, False)
+                    self._journal_tell("sent_overload len %d" % len(text))
                 except Exception as exc:
                     # перегруз не взял аргументы (Chaquopy) — причина в журнал,
                     # отправка уходит запасным путём без entities
@@ -428,10 +437,15 @@ class MentionAllPlugin(BasePlugin):
             # shortcut: entities в подписи не гарантированы, лечить по факту)
             def go():
                 if field is not None and text is not None:
-                    setattr(params, field, text)
+                    setattr(params, field, fallback_text(text))
                     if entities is not None and entities.size() > 0:
                         params.entities = entities
+                if field == "message" and not (params.message or "").strip():
+                    self._journal_tell("skip_empty_message")
+                    return
                 helper.sendMessage(params)
+                self._journal_tell("sent_params len %d"
+                                   % len(str(getattr(params, field or "message") or "")))
 
         run_on_ui_thread(go)
 

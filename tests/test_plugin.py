@@ -114,6 +114,15 @@ class FakeJavaList:
 assert mod._jlist(FakeJavaList(1, 2, 3)) == [1, 2, 3]
 assert mod._jlist(None) == []
 
+# ---- fallback_text: текст после сбоя никогда не пустой ----
+
+fb = mod.fallback_text
+assert fb("@all") == "@all"           # одни токены — оставляем как есть
+assert fb("@all привет") == "привет"
+assert fb("  @all  ") == "  @all  "   # пустой результат недопустим
+assert fb("текст") == "текст"
+assert fb("@all @all") == "@all @all"  # всё съедено — как напечатано
+
 # ---- pick_members: кого упоминать ----
 
 pick = mod.pick_members
