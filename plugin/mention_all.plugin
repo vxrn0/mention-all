@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -329,6 +329,7 @@ class MentionAllPlugin(BasePlugin):
               field: Optional[str] = None, text: Optional[str] = None):
         """Сбой: показать причину один раз и отправить без повторного входа."""
         self.log("mention-all FAIL: " + reason)
+        self._journal_tell(reason)
         # диалог, а не бюллетень: остаётся на экране, пока пользователь не
         # закроет — текст ошибки теперь реально можно прочитать
         self._alert("Mention All", reason + "\n\n" + self._check_report())
@@ -340,6 +341,18 @@ class MentionAllPlugin(BasePlugin):
             if stripped:
                 setattr(params, field, stripped)
         self._resend(account, params)  # не теряем сообщение пользователя
+
+    def _journal_tell(self, text: str):
+        """Причину сбоя — в журнал активности: его стабильно смотрят и
+        скринят, в отличие от диалога.
+        shortcut: хак через импорт-событие audit-гейта, убрать, когда ошибки уйдут."""
+        safe = re.sub(r"[^0-9A-Za-z]+", "_", str(text)).strip("_")[:120]
+        if not safe:
+            return
+        try:
+            __import__("mention_all_error_%s" % safe)
+        except Exception:
+            pass  # ImportError и есть: событие в журнал пишется до резолва
 
     def _resend(self, account: int, params: Any, field: Optional[str] = None,
                 text: Optional[str] = None, entities: Any = None):
@@ -353,15 +366,22 @@ class MentionAllPlugin(BasePlugin):
 
         if field == "message" and text is not None:
             def go():
-                helper.sendMessage(
-                    text, params.peer,
-                    params.replyToMsg, params.replyToTopMsg,
-                    params.webPage, bool(params.searchLinks),
-                    entities if entities is not None and entities.size() > 0
-                    else None,
-                    params.replyMarkup, params.params, bool(params.notify),
-                    int(params.scheduleDate), int(params.scheduleRepeatPeriod),
-                    None, False)
+                try:
+                    helper.sendMessage(
+                        text, params.peer,
+                        params.replyToMsg, params.replyToTopMsg,
+                        params.webPage, bool(params.searchLinks),
+                        entities if entities is not None and entities.size() > 0
+                        else None,
+                        params.replyMarkup, params.params, bool(params.notify),
+                        int(params.scheduleDate), int(params.scheduleRepeatPeriod),
+                        None, False)
+                except Exception as exc:
+                    # перегруз не взял аргументы (Chaquopy) — причина в журнал,
+                    # отправка уходит запасным путём без entities
+                    self._journal_tell("send_overload: %s" % (exc,))
+                    setattr(params, "message", text)
+                    helper.sendMessage(params)
         else:
             # сбой/подпись: сообщение как напечатано (или подпись к медиа —
             # shortcut: entities в подписи не гарантированы, лечить по факту)
