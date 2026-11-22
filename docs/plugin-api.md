@@ -22,14 +22,22 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
   `get_*_controller` / `send_*` helper.
 - **Mention entities.** The SDK markdown dialect has no `mention:` links and no
   text mentions. To ping a user without a username, build
-  `TLRPC.TL_messageEntityMentionName` yourself (`offset`, `length`, `user_id`);
-  for `@username` spans build `TL_messageEntityMention`. Send them through the
-  public `sendMessage(message, peer, ..., entities, ...)` overload of
-  `SendMessagesHelper` — the one ChatActivity itself uses. Mutating
-  `SendMessageParams.entities` on a hook's params object silently loses the
-  entities on some builds; the overload passes them as a Java argument and
-  is reliable. Chaquopy does not convert a Python list into the Java
-  parameter: build a `java.util.ArrayList`.
+  `TLRPC.TL_messageEntityMentionName` (`offset`, `length`, `user_id`); for
+  `@username` spans build `TL_messageEntityMention`. Deliver them through the
+  hook's own params: mutate `params.message` / `params.entities` and return
+  `HookResult(strategy=HookStrategy.MODIFY, params=params)`. `sendMessage` reads
+  `sendMessageParams.entities` **after** the hook returns (it does
+  `sendMessageParams.entities` → `reqSend.entities`, `flags |= 8`), so entities
+  set in place travel in the same client request. Do not cancel and re-send
+  through the positional `sendMessage(message, peer, ..., entities, ...)`
+  overload: 14 positional arguments are not marshalled reliably through
+  Chaquopy, and a cancelled send loses the text the user typed. Chaquopy does
+  not convert a Python list into the Java field: build a `java.util.ArrayList`.
+- **Cache what the hook needs.** The hook is synchronous, participants come
+  from the network. Fetch them on the first `@all`, keep them per
+  `(account, peer)` with a TTL, cancel that one send while fetching, then
+  re-send: the re-send passes the same hook, now with a warm cache, and hits
+  the mutation path above.
 - **Offsets are UTF-16.** Telegram counts entity offsets and lengths in UTF-16
   code units, not characters: `len(s.encode("utf-16-le")) // 2`.
 - **TL field types are not interchangeable.** `channels.getParticipants`
