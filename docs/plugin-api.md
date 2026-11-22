@@ -22,7 +22,8 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
   `get_*_controller` / `send_*` helper.
 - **Mention entities.** The SDK markdown dialect has no `mention:` links and no
   text mentions. To ping a user without a username, build
-  `TLRPC.TL_messageEntityMentionName` (`offset`, `length`, `user_id`); for
+  `TLRPC.TL_inputMessageEntityMentionName` (`offset`, `length`,
+  `user_id` as an `InputUser` from `MessagesController.getInputUser(user)`); for
   `@username` spans build `TL_messageEntityMention`. Deliver them through the
   hook's own params: mutate `params.message` / `params.entities` and return
   `HookResult(strategy=HookStrategy.MODIFY, params=params)`. `sendMessage` reads
