@@ -344,6 +344,11 @@ text, spans = build("@all", [(1, None, "\ufe0e"), (2, None, "\ufe0e"), (3, "ann"
 assert text == "Без имени · 1 Без имени · 2 @ann", repr(text)
 assert spans == [(0, 13, 1, None), (14, 13, 2, None), (28, 4, 3, "ann")], spans
 
+# пробельное имя сохраняется буквально, entity покрывает пробелы
+text, spans = build("@all", [(11, None, "   "), (22, None, "  ")], 100)
+assert text == "      ", repr(text)
+assert spans == [(0, 3, 11, None), (4, 2, 22, None)], spans
+
 # обычное имя остаётся как было
 assert build("@all", [(1, None, "Ann")], 100)[0] == "Ann"
 

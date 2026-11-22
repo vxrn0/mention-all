@@ -89,20 +89,20 @@ def build_mentions(text: str, members: List[Tuple[int, Optional[str], str]],
     if match is None or not members:
         return text, []
     # имя может содержать @all — вырезаем, иначе повторный хук зациклит отправку
-    picked = [(uid, (uname or "").strip(),
-               clean_label(TOKEN_CLEAN.sub("", name)))
+    picked = [(uid, (uname or "").strip(), TOKEN_CLEAN.sub("", name))
               for uid, uname, name in members[:max(0, limit)]]
     pieces = []
     spans = []
     pos = utf16len(text[:match.start()])
-    for uid, uname, name in picked:
+    for uid, uname, raw_name in picked:
         if uname:
             span = "@" + uname
         else:
-            # имя может быть невидимым (профиль без видимых символов):
-            # text_mention нужен видимый текст — показываем точный ID вместо
-            # произвольного номера, чтобы можно было различить получателей.
-            span = name or ("Без имени · %d" % uid)
+            name = clean_label(raw_name)
+            # Пробельные имена допустимы: ручное упоминание — entity поверх
+            # тех же пробелов. ID нужен только для пустого/невидимого имени.
+            span = name or (raw_name if raw_name and raw_name.isspace()
+                            else "Без имени · %d" % uid)
         pieces.append(span)
         spans.append((pos, utf16len(span), uid, uname or None))
         pos += utf16len(span) + 1  # разделительный пробел
@@ -451,13 +451,11 @@ class MentionAllPlugin(BasePlugin):
             for user in users:
                 uid = int(user.id)
                 uname = (user.username or "").strip()
-                name = clean_label((user.first_name or "") +
-                                   ((" " + user.last_name)
-                                    if user.last_name else ""))
+                name = (user.first_name or "") + \
+                    ((" " + user.last_name) if user.last_name else "")
                 if not uname:
                     input_users[uid] = mc.getInputUser(user)
-                # пустое имя не повод выкидывать человека: build_mentions
-                # покажет «Без имени · ID», сохранив entity на этого человека
+                # Пробельное имя сохраняем буквально для text-mention entity.
                 entries.append((uid, uname, name,
                                 bool(user.bot or user.deleted)))
             members, self_filter_ate_all = pick_members(entries, me)
