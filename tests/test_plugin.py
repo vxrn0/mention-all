@@ -298,4 +298,22 @@ assert attempted and attempted[-1].startswith(
     "mention_all_error_no_members"), attempted
 assert all(ord(c) < 128 for c in attempted[-1]), attempted[-1]
 
+# ---- невидимые имена (U+FE0E) не должны давать пустые упоминания ----
+
+label = mod.clean_label
+assert label("\ufe0e") == ""
+assert label("\ufe0e \ufe0e \ufe0e") == ""
+assert label("  Аня  " ) == "Аня"
+assert label("A\u200bb") == "Ab"            # zero-width space
+assert label("Аня\ufe0e") == "Аня"
+assert label("सचिन") == "सचिन"              # комбинирующие знаки — не мусор
+
+# имя из одних невидимых символов -> видимая подпись, но пинг сохраняется
+text, spans = build("@all", [(1, None, "\ufe0e"), (2, None, "\ufe0e"), (3, "ann", "Ann")], 100)
+assert text == "Участник 1 Участник 2 @ann", repr(text)
+assert spans == [(0, 10, 1, None), (11, 10, 2, None), (22, 4, 3, "ann")], spans
+
+# обычное имя остаётся как было
+assert build("@all", [(1, None, "Ann")], 100)[0] == "Ann"
+
 print("ok")

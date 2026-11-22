@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -21,6 +21,7 @@ __permissions__ = ["messages.send", "network"]
 
 import re
 import time
+import unicodedata
 from typing import Any, List, Optional, Tuple
 
 from base_plugin import BasePlugin, HookResult, HookStrategy
@@ -37,6 +38,26 @@ SUPERGROUP_FLAG = -1000000000000
 _FAIL_TTL = 60.0
 # сколько секунд держать список участников чата
 _MEMBERS_TTL = 600.0
+
+
+def is_invisible(ch: str) -> bool:
+    """Символ, который не видно: вариационные селекторы, форматирующие,
+    управляющие. В Telegram имя профиля можно поставить целиком из таких —
+    тогда упоминание выглядит пустым (1.2.1 на устройстве: U+FE0E)."""
+    if "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef":
+        return True
+    return unicodedata.category(ch) in ("Cf", "Cc", "Cs", "Co")
+
+
+def clean_label(name: str) -> str:
+    """Имя без невидимых символов, с схлопнутыми пробелами.
+    Комбинирующие знаки (Mn) не трогаем — они нужны живым письменностям."""
+    kept = []
+    for ch in name or "":
+        if is_invisible(ch):
+            continue
+        kept.append(" " if ch.isspace() else ch)
+    return " ".join("".join(kept).split())
 
 
 def utf16len(s: str) -> int:
@@ -69,13 +90,22 @@ def build_mentions(text: str, members: List[Tuple[int, Optional[str], str]],
         return text, []
     # имя может содержать @all — вырезаем, иначе повторный хук зациклит отправку
     picked = [(uid, (uname or "").strip(),
-               TOKEN_CLEAN.sub("", name).strip() or "User")
+               clean_label(TOKEN_CLEAN.sub("", name)))
               for uid, uname, name in members[:max(0, limit)]]
     pieces = []
     spans = []
     pos = utf16len(text[:match.start()])
+    placeholder = 0
     for uid, uname, name in picked:
-        span = ("@" + uname) if uname else name
+        if uname:
+            span = "@" + uname
+        else:
+            # имя может быть невидимым (профиль без видимых символов):
+            # text_mention нужен видимый текст, иначе выходят пробелы
+            span = name
+            if not span:
+                placeholder += 1
+                span = "Участник %d" % placeholder
         pieces.append(span)
         spans.append((pos, utf16len(span), uid, uname or None))
         pos += utf16len(span) + 1  # разделительный пробел
@@ -261,8 +291,11 @@ class MentionAllPlugin(BasePlugin):
             params.entities = entities
         self.log("mention-all: %d mentions, message length %d"
                  % (len(spans), utf16len(new_text)))
-        self._journal_tell("modify n %d e %d len %d"
-                           % (len(spans), entities.size(), utf16len(new_text)))
+        # inv — сколько в итоговом тексте невидимых символов: если не ноль,
+        # значит в имя всё ещё пролезло что-то невидимое
+        self._journal_tell("modify n %d e %d len %d inv %d"
+                           % (len(spans), entities.size(), utf16len(new_text),
+                              sum(1 for ch in new_text if is_invisible(ch))))
         return HookResult(strategy=HookStrategy.MODIFY, params=params)
 
     # ---- сбор участников ----
@@ -409,12 +442,11 @@ class MentionAllPlugin(BasePlugin):
             for user in users:
                 uid = int(user.id)
                 uname = (user.username or "").strip()
-                name = ((user.first_name or "") +
-                        ((" " + user.last_name) if user.last_name else "")).strip()
-                # ни юзернейма, ни имени — упоминать некого, вышла бы дырка
-                # (1.2.0: пять таких записей дали сообщение из пробелов)
-                if not uname and not name:
-                    continue
+                name = clean_label((user.first_name or "") +
+                                   ((" " + user.last_name)
+                                    if user.last_name else ""))
+                # пустое имя не повод выкидывать человека: в build_mentions
+                # он получит видимую подпись «Участник N» и всё равно пинг
                 entries.append((uid, uname, name,
                                 bool(user.bot or user.deleted)))
             members, self_filter_ate_all = pick_members(entries, me)
