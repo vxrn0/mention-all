@@ -150,4 +150,25 @@ seen.clear()
 assert plugin.on_send_message_hook(7, p) is None  # сбой запомнен — не отменяем
 assert not seen  # и даже не пытаемся собрать участников
 
+# ---- причина сбоя доходит до журнала латиницей ----
+
+attempted = []
+real_import = __import__
+
+
+def spy(name, *args, **kwargs):
+    attempted.append(name)
+    return real_import(name, *args, **kwargs)
+
+
+mod.__builtins__["__import__"] = spy
+try:
+    plugin._journal_tell("no_members него упоминать: получено 3, лимит 100")
+finally:
+    mod.__builtins__["__import__"] = real_import
+# русский текст не должен съесть событие целиком: тег и числа остаются
+assert attempted and attempted[-1].startswith(
+    "mention_all_error_no_members"), attempted
+assert all(ord(c) < 128 for c in attempted[-1]), attempted[-1]
+
 print("ok")
