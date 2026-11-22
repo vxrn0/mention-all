@@ -114,6 +114,25 @@ class FakeJavaList:
 assert mod._jlist(FakeJavaList(1, 2, 3)) == [1, 2, 3]
 assert mod._jlist(None) == []
 
+# ---- pick_members: кого упоминать ----
+
+pick = mod.pick_members
+# себя выкидываем, ботов и удалённых — в резерв
+entries = [(1, "me_x", "Me", False), (2, "ann", "Ann", False),
+           (3, "", "Bot", True), (4, "", "Gone", True)]
+assert pick(entries, 1) == ([(2, "ann", "Ann")], False)
+# живых нет — упоминаем ботов/удалённых, а не отказываем
+assert pick([(1, "", "Me", False), (3, "", "Bot", True)], 1) == (
+    [(3, "", "Bot")], False)
+# сравнение id врёт: «это я» съело весь список — отдаём всех (баг 1.1.3)
+assert pick([(0, "ann", "Ann", False), (0, "", "Bob", False)], 0) == (
+    [(0, "ann", "Ann"), (0, "", "Bob")], True)
+# обычный случай: свой id отсекается, остальные остаются
+assert pick([(7, "ann", "Ann", False), (8, "", "Bob", False)], 7) == (
+    [(8, "", "Bob")], False)
+# пусто — пусто, без падения
+assert pick([], 1) == ([], True)
+
 # ---- маршрутизация хука (до Java-кода) ----
 
 
