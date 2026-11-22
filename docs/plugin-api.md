@@ -37,10 +37,10 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
 - **Names can be invisible.** A Telegram profile can have a first name that is
   only variation selectors or format characters (`U+FE0E` is the common one).
   Such a name is non-empty as a string but renders as nothing, so a
-  `mentionName` built on it turns into blank space. Strip `Cf`/`Cc`/`Cs`/`Co`
-  and variation selectors before using a name as mention text, and fall back to
-  a visible label containing the user ID when nothing is left; the entity
-  keeps targeting that user.
+  `mentionName` built on it turns into blank space. Preserve literal whitespace
+  names as the entity text (the client supports clickable mentions over spaces);
+  use a visible label containing the user ID only when the name has no visible
+  text and is not whitespace.
 - **Cache what the hook needs.** The hook is synchronous, participants come
   from the network. Fetch them on the first `@all`, keep them per
   `(account, peer)` with a TTL, cancel that one send while fetching, then

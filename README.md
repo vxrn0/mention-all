@@ -12,8 +12,8 @@ a username, via text-mention entities. Telegram itself has no such feature.
   left alone.
 - Works in basic groups and supergroups, in message text and media captions.
 - Members with a username are mentioned as `@username`; the rest get a
-  text mention by user ID. A name made only of invisible characters is labelled
-  `Без имени · ID`; the label includes that member's ID.
+  text mention by user ID. Names made of spaces stay spaces as the clickable
+  text; names made only of invisible non-space characters use `Без имени · ID`.
 - Skips you, bots and deleted accounts.
 - Adjustable mention cap (default 100) for large groups.
 - If the member list cannot be fetched, your message is sent as typed —
