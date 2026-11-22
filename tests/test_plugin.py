@@ -18,8 +18,9 @@ base_plugin.HookStrategy = types.SimpleNamespace(
 
 
 class HookResult:
-    def __init__(self, strategy=None, **_):
+    def __init__(self, strategy=None, params=None, **_):
         self.strategy = strategy
+        self.params = params
 
 
 class BasePlugin:
@@ -46,6 +47,42 @@ for cls in ("Header", "Switch", "Input", "Text", "Divider", "Selector"):
     setattr(ui_settings, cls, lambda **kw: _Item(**kw))
 ui.settings = ui_settings
 sys.modules.update({"base_plugin": base_plugin, "ui": ui, "ui.settings": ui_settings})
+
+
+class ArrayList(list):
+    def size(self):
+        return len(self)
+
+    def add(self, item):
+        self.append(item)
+
+
+java_util = types.ModuleType("java.util")
+java_util.ArrayList = ArrayList
+
+
+class _Mention:
+    kind = "mention"
+
+    def __init__(self):
+        self.offset = self.length = 0
+
+
+class _MentionName:
+    kind = "mentionName"
+
+    def __init__(self):
+        self.offset = self.length = self.user_id = 0
+
+
+tgnet = types.ModuleType("org.telegram.tgnet")
+tgnet.TLRPC = types.SimpleNamespace(
+    TL_messageEntityMention=_Mention,
+    TL_messageEntityMentionName=_MentionName)
+for name in ("org", "org.telegram"):
+    sys.modules[name] = types.ModuleType(name)
+sys.modules.update({"java": types.ModuleType("java"), "java.util": java_util,
+                    "org.telegram.tgnet": tgnet})
 
 # ---- загрузка плагина ----
 
@@ -177,6 +214,31 @@ mod.MentionAllPlugin._recent_fail[(int(p.peer), "go @all")] = time.monotonic()
 seen.clear()
 assert plugin.on_send_message_hook(7, p) is None  # сбой запомнен — не отменяем
 assert not seen  # и даже не пытаемся собрать участников
+
+# ---- тёплый кэш: MODIFY, текст и entities в одном проходе ----
+
+mod.MentionAllPlugin._recent_fail.clear()
+mod.MentionAllPlugin._members[(7, -123)] = (
+    time.monotonic(), [(5, "ann_x", "Ann"), (6, "", "Bob")])
+p = Params(-123, "hi @all")
+res = plugin.on_send_message_hook(7, p)
+# штатный путь клиента: тот же объект params, стратегия MODIFY
+assert res is not None and res.strategy == mod.HookStrategy.MODIFY
+assert res.params is p
+assert p.message == "hi @ann_x Bob", p.message
+ents = p.entities
+assert ents.size() == 2, ents
+assert ents[0].kind == "mention" and ents[0].offset == 3 and ents[0].length == 6
+assert ents[1].kind == "mentionName" and ents[1].offset == 10
+assert ents[1].length == 3 and ents[1].user_id == 6
+
+# просроченный кэш не используется: отправка снова отменяется на сбор
+mod.MentionAllPlugin._members[(7, -123)] = (
+    time.monotonic() - 10_000, [(5, "ann_x", "Ann")])
+assert plugin.on_send_message_hook(7, Params(-123, "@all")).strategy == (
+    mod.HookStrategy.CANCEL)
+mod.MentionAllPlugin._members.clear()
+mod.MentionAllPlugin._recent_fail.clear()
 
 # ---- причина сбоя доходит до журнала латиницей ----
 

@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.1.5"
+__version__ = "1.2.0"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -35,6 +35,8 @@ SUPERGROUP_FLAG = -1000000000000
 
 # сколько секунд после сбоя не пытаться снова на том же тексте
 _FAIL_TTL = 60.0
+# сколько секунд держать список участников чата
+_MEMBERS_TTL = 600.0
 
 
 def utf16len(s: str) -> int:
@@ -128,6 +130,10 @@ class MentionAllPlugin(BasePlugin):
     # (peer, текст) -> время сбоя; класс, а не экземпляр: защёлка должна
     # переживать перезагрузку плагина в живом процессе
     _recent_fail = {}
+    # (account, peer) -> (время сбора, [(user_id, username, имя), ...]):
+    # хук синхронный, а участники приходят из сети — без кэша entities
+    # не собрать в том же вызове, в котором клиент читает params
+    _members = {}
     # одна диагностическая строка в журнал за запуск процесса
     _diag_done = False
     def on_plugin_load(self):
@@ -180,10 +186,42 @@ class MentionAllPlugin(BasePlugin):
 
     # ---- хук исходящих ----
 
+    def _cached_members(self, account: int, peer: int):
+        """Участники из кэша (свежие — не старше TTL), иначе None."""
+        hit = self._members.get((account, peer))
+        if hit is None:
+            return None
+        stamp, members = hit
+        if time.monotonic() - stamp > _MEMBERS_TTL:
+            self._members.pop((account, peer), None)
+            return None
+        return members
+
+    def _entities(self, spans):
+        """Спаны в java.util.ArrayList из TL-entities: mention для @username,
+        mentionName по user_id для остальных. Сбой на одной не уносит текст."""
+        from java.util import ArrayList
+        from org.telegram.tgnet import TLRPC
+
+        entities = ArrayList()
+        for offset, length, uid, uname in spans:
+            try:
+                if uname:
+                    entity = TLRPC.TL_messageEntityMention()
+                else:
+                    entity = TLRPC.TL_messageEntityMentionName()
+                    entity.user_id = int(uid)
+                entity.offset = int(offset)
+                entity.length = int(length)
+                entities.add(entity)
+            except Exception as exc:
+                self._journal_tell("entity_skip %s" % (exc,))
+        return entities
+
     def on_send_message_hook(self, account: int, params: Any):
         if not self.get_setting("enabled", True):
             return None
-        # shortcut: только текст, только группы; медиа без подписи мимо
+        # shortcut: только текст и подписи, только группы; медиа без подписи мимо
         field = "message" if params.message else "caption" if params.caption else None
         if field is None or int(params.peer) >= 0:
             return None
@@ -195,10 +233,37 @@ class MentionAllPlugin(BasePlugin):
         ts = self._recent_fail.get(key)
         if ts is not None and time.monotonic() - ts < _FAIL_TTL:
             return None
-        # Отменяем отправку и собираем участников асинхронно:
-        # список участников приходит из сети, синхронно его не получить
-        self._mention_all(account, params, field, text)
-        return HookResult(strategy=HookStrategy.CANCEL)
+
+        members = self._cached_members(account, int(params.peer))
+        if members is None:
+            # Список участников приходит из сети: отменяем отправку, собираем
+            # и переотправляем. Переотправка снова проходит этот хук — уже с
+            # тёплым кэшем, то есть ниже, штатным MODIFY.
+            self._mention_all(account, params, field, text)
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        return self._apply(account, params, field, text, members)
+
+    def _apply(self, account: int, params: Any, field: str, text: str, members):
+        """Один проход: подменить текст и entities прямо в params и вернуть
+        MODIFY. Java читает entities из params уже после хука, поэтому это
+        штатный путь клиента — без переотправки и без позиционных overload'ов."""
+        try:
+            new_text, spans = build_mentions(text, members, self._limit())
+        except Exception as exc:
+            self._journal_tell("build %s" % (exc,))
+            return None
+        if not spans:
+            return None  # упоминать некого — пусть уходит как напечатано
+        entities = self._entities(spans)
+        setattr(params, field, new_text)
+        if entities.size() > 0:
+            params.entities = entities
+        self.log("mention-all: %d mentions, message length %d"
+                 % (len(spans), utf16len(new_text)))
+        self._journal_tell("modify n %d e %d len %d"
+                           % (len(spans), entities.size(), utf16len(new_text)))
+        return HookResult(strategy=HookStrategy.MODIFY, params=params)
 
     # ---- сбор участников ----
 
@@ -313,9 +378,7 @@ class MentionAllPlugin(BasePlugin):
                        tag="members_request")
             return
 
-        from java.util import ArrayList
         from client_utils import get_user_config
-        from org.telegram.tgnet import TLRPC
 
         try:
             me = int(get_user_config(account).getClientUserId())
@@ -350,25 +413,13 @@ class MentionAllPlugin(BasePlugin):
                            "лимит %d" % (len(users), len(members), limit),
                            field, text, tag="no_members")
                 return
-            # entities строим по одной: сбой на одной не должен унести текст
-            # (1.1.4 на устройстве: исключение здесь → _fail отправил params,
-            # а клиент к тому моменту уже очистил текст → пустое сообщение)
-            entities = ArrayList()
-            for offset, length, uid, uname in spans:
-                try:
-                    if uname:
-                        entity = TLRPC.TL_messageEntityMention()
-                    else:
-                        entity = TLRPC.TL_messageEntityMentionName()
-                        entity.user_id = int(uid)
-                    entity.offset = int(offset)
-                    entity.length = int(length)
-                    entities.add(entity)
-                except Exception as exc:
-                    self._journal_tell("entity_skip %s" % (exc,))
+            self._members[(account, int(params.peer))] = (time.monotonic(),
+                                                          members)
             self.log("mention-all: %d mentions, message length %d"
                      % (len(spans), utf16len(new_text)))
-            self._resend(account, params, field, new_text, entities)
+            # Переотправка снова проходит хук — кэш тёплый, и там сработает
+            # MODIFY: текст и entities уйдут одним штатным вызовом клиента
+            self._resend(account, params)
         except Exception as exc:
             self._fail(account, params, "сборка упоминаний: %r" % (exc,),
                        field, text, tag="build")
@@ -405,47 +456,26 @@ class MentionAllPlugin(BasePlugin):
 
     def _resend(self, account: int, params: Any, field: Optional[str] = None,
                 text: Optional[str] = None, entities: Any = None):
-        """Переотправка. Для текста — публичный перегруз sendMessage, каким
-        ходит сам ChatActivity: entities уходят Java-аргументом, надёжнее,
-        чем присваивание поля чужого params (на нём entities и терялись)."""
+        """Переотправка тем же публичным sendMessage(params), каким ходит
+        клиент. Вызов снова проходит хук: если кэш участников тёплый, там
+        сработает MODIFY и entities уйдут штатно; если нет — текст уйдёт
+        хотя бы без упоминаний, но никогда пустым."""
         from android_utils import run_on_ui_thread
         from client_utils import get_send_messages_helper
 
         helper = get_send_messages_helper(account)
 
-        if field == "message" and text is not None:
-            def go():
-                try:
-                    helper.sendMessage(
-                        text, params.peer,
-                        params.replyToMsg, params.replyToTopMsg,
-                        params.webPage, bool(params.searchLinks),
-                        entities if entities is not None and entities.size() > 0
-                        else None,
-                        params.replyMarkup, params.params, bool(params.notify),
-                        int(params.scheduleDate), int(params.scheduleRepeatPeriod),
-                        None, False)
-                    self._journal_tell("sent_overload len %d" % len(text))
-                except Exception as exc:
-                    # перегруз не взял аргументы (Chaquopy) — причина в журнал,
-                    # отправка уходит запасным путём без entities
-                    self._journal_tell("send_overload: %s" % (exc,))
-                    setattr(params, "message", text)
-                    helper.sendMessage(params)
-        else:
-            # сбой/подпись: сообщение как напечатано (или подпись к медиа —
-            # shortcut: entities в подписи не гарантированы, лечить по факту)
-            def go():
-                if field is not None and text is not None:
-                    setattr(params, field, fallback_text(text))
-                    if entities is not None and entities.size() > 0:
-                        params.entities = entities
-                if field == "message" and not (params.message or "").strip():
-                    self._journal_tell("skip_empty_message")
-                    return
-                helper.sendMessage(params)
-                self._journal_tell("sent_params len %d"
-                                   % len(str(getattr(params, field or "message") or "")))
+        def go():
+            if field is not None and text is not None:
+                setattr(params, field, fallback_text(text))
+                if entities is not None and entities.size() > 0:
+                    params.entities = entities
+            if field == "message" and not (params.message or "").strip():
+                self._journal_tell("skip_empty_message")
+                return
+            helper.sendMessage(params)
+            self._journal_tell("resent len %d" % len(
+                str(getattr(params, field or "message") or "")))
 
         run_on_ui_thread(go)
 
