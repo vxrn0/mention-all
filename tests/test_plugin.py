@@ -56,6 +56,9 @@ class ArrayList(list):
     def add(self, item):
         self.append(item)
 
+    def get(self, i):
+        return self[i]
+
 
 java_util = types.ModuleType("java.util")
 java_util.ArrayList = ArrayList
@@ -179,8 +182,42 @@ assert pick([(7, "ann", "Ann", False), (8, "", "Bob", False)], 7) == (
 # пусто — пусто, без падения
 assert pick([], 1) == ([], True)
 
-# ---- маршрутизация хука (до Java-кода) ----
+# ---- _response_users: getUser(0) отдаёт текущего пользователя ----
 
+client_utils = types.ModuleType("client_utils")
+
+
+class _User:
+    def __init__(self, uid, username="", first_name=""):
+        self.id, self.username, self.first_name = uid, username, first_name
+        self.last_name = ""
+
+
+class _MC:
+    """Кэш клиента, ведущий себя как настоящий: getUser(0) — это вы."""
+
+    def __init__(self, cache):
+        self.cache = cache
+
+    def getUser(self, uid):
+        if int(uid) == 0:
+            return _User(8617084680, "", "")  # как MessagesController
+        return self.cache.get(int(uid))
+
+
+client_utils.get_messages_controller = lambda account=None: _MC(
+    {5: _User(5, "ann_x", "Ann")})
+sys.modules["client_utils"] = client_utils
+
+plugin_ru = mod.MentionAllPlugin()
+# участник с id=0 не должен превратиться в «вас», а кэш уточняет юзернейм
+got = plugin_ru._response_users(7, ArrayList(
+    [_User(0), _User(5, "", "Ann"), _User(6, "", "Bob")]))
+assert [u.id for u in got] == [5, 6], [u.id for u in got]
+assert got[0].username == "ann_x", got[0].username
+assert got[1].username == "", got[1].username
+
+# ---- маршрутизация хука (до Java-кода) ----
 
 class Params:
     def __init__(self, peer, message, caption=None):

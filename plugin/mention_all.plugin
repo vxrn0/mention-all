@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -253,7 +253,7 @@ class MentionAllPlugin(BasePlugin):
         except Exception as exc:
             self._journal_tell("build %s" % (exc,))
             return None
-        if not spans:
+        if not spans or not new_text.strip():
             return None  # упоминать некого — пусть уходит как напечатано
         entities = self._entities(spans)
         setattr(params, field, new_text)
@@ -292,16 +292,12 @@ class MentionAllPlugin(BasePlugin):
             else:
                 req = TLRPC.TL_messages_getFullChat()
                 req.chat_id = int(chat_id)
-                mc = get_messages_controller(account)
 
                 def full_done(response, error):
                     try:
                         users = []
                         if error is None and response is not None:
-                            for p in _jlist(response.full_chat.participants.participants):
-                                user = mc.getUser(p.user_id)
-                                if user is not None:
-                                    users.append(user)
+                            users = self._response_users(account, response.users)
                         done(users, error if error is not None
                              else None if users else "список участников пуст")
                     except Exception as exc:
@@ -312,10 +308,46 @@ class MentionAllPlugin(BasePlugin):
             self._fail(account, params, "ошибка запуска: %r" % (exc,), field, text,
                        tag="start")
 
+    def _response_users(self, account: int, response_users):
+        """Участники из поля users ответа, с уточнением юзернеймов из кэша.
+
+        В этом слое ChannelParticipant больше не имеет user_id (id лежит в
+        peer), поэтому participants не годятся: participant.user_id = 0, а
+        MessagesController.getUser(0) отдаёт ТЕКУЩЕГО пользователя, не None.
+        На устройстве (1.2.0) это дало пять «вас» и текст из пробелов.
+        Поэтому источник — response.users; кэш только уточняет юзернейм и
+        принимается лишь при совпадении id.
+        """
+        from client_utils import get_messages_controller
+
+        try:
+            mc = get_messages_controller(account)
+        except Exception:
+            mc = None
+        users = []
+        for user in _jlist(response_users):
+            try:
+                uid = int(user.id)
+            except Exception:
+                continue
+            if uid == 0:
+                continue  # пустышка, кэш по нулю вернёт текущего пользователя
+            cached = None
+            if mc is not None:
+                try:
+                    cached = mc.getUser(uid)
+                except Exception:
+                    cached = None
+            if cached is not None and int(cached.id) == uid:
+                users.append(cached)
+            else:
+                users.append(user)
+        return users
+
     def _supergroup_members(self, account: int, chat_id: int, access_hash: int,
                             limit: int, on_done, offset: int = 0,
                             collected: Optional[list] = None):
-        from client_utils import get_messages_controller, send_request
+        from client_utils import send_request
         from org.telegram.tgnet import TLRPC
 
         if collected is None:
@@ -340,20 +372,11 @@ class MentionAllPlugin(BasePlugin):
                     on_done(collected, "getParticipants: %s"
                             % (_error_text(error) or "пустой ответ"))
                     return
-                fetched = {}
-                for user in _jlist(response.users):
-                    fetched[int(user.id)] = user
-                # из клиентского кэша: он же кормит меню упоминаний, и юзернеймы
-                # там есть всегда; в ответе getParticipants они бывают пусты
-                mc = get_messages_controller(account)
-                users = []
-                for participant in _jlist(response.participants):
-                    uid = int(participant.user_id)
-                    user = mc.getUser(uid) or fetched.get(uid)
-                    if user is not None:
-                        users.append(user)
+                # participants не используем: у ChannelParticipant в этом слое
+                # нет user_id (только peer) — см. _response_users
+                users = self._response_users(account, response.users)
                 collected.extend(users)
-                got = response.participants.size()
+                got = len(_jlist(response.participants))
                 if got < batch or len(collected) >= limit:
                     on_done(collected, None)
                 else:
@@ -384,10 +407,16 @@ class MentionAllPlugin(BasePlugin):
             me = int(get_user_config(account).getClientUserId())
             entries = []
             for user in users:
-                name = (user.first_name or "") + \
-                    ((" " + user.last_name) if user.last_name else "")
-                entries.append((int(user.id), (user.username or "").strip(),
-                                name.strip(), bool(user.bot or user.deleted)))
+                uid = int(user.id)
+                uname = (user.username or "").strip()
+                name = ((user.first_name or "") +
+                        ((" " + user.last_name) if user.last_name else "")).strip()
+                # ни юзернейма, ни имени — упоминать некого, вышла бы дырка
+                # (1.2.0: пять таких записей дали сообщение из пробелов)
+                if not uname and not name:
+                    continue
+                entries.append((uid, uname, name,
+                                bool(user.bot or user.deleted)))
             members, self_filter_ate_all = pick_members(entries, me)
             if not MentionAllPlugin._diag_done:
                 MentionAllPlugin._diag_done = True
@@ -407,7 +436,7 @@ class MentionAllPlugin(BasePlugin):
 
             limit = self._limit()
             new_text, spans = build_mentions(text, members, limit)
-            if not spans:
+            if not spans or not new_text.strip():
                 self._fail(account, params,
                            "некого упоминать: получено %d, отобрано %d, "
                            "лимит %d" % (len(users), len(members), limit),
