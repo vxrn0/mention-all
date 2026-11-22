@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -160,7 +160,7 @@ class MentionAllPlugin(BasePlugin):
     # (peer, текст) -> время сбоя; класс, а не экземпляр: защёлка должна
     # переживать перезагрузку плагина в живом процессе
     _recent_fail = {}
-    # (account, peer) -> (время сбора, [(user_id, username, имя), ...]):
+    # (account, peer) -> (время сбора, участники, InputUser по id):
     # хук синхронный, а участники приходят из сети — без кэша entities
     # не собрать в том же вызове, в котором клиент читает params
     _members = {}
@@ -221,31 +221,37 @@ class MentionAllPlugin(BasePlugin):
         hit = self._members.get((account, peer))
         if hit is None:
             return None
-        stamp, members = hit
+        stamp, members, input_users = hit
         if time.monotonic() - stamp > _MEMBERS_TTL:
             self._members.pop((account, peer), None)
             return None
-        return members
+        return members, input_users
 
-    def _entities(self, spans):
-        """Спаны в java.util.ArrayList из TL-entities: mention для @username,
-        mentionName по user_id для остальных. Сбой на одной не уносит текст."""
+    def _entities(self, spans, input_users):
+        """Строит именно input-entities для исходящего запроса.
+
+        TL_inputMessageEntityMentionName + InputUser — тип, который использует
+        сам клиент при выборе человека без username из @-меню.
+        TL_messageEntityMentionName — серверная entity для уже отправленного
+        сообщения; для исходящего запроса она неверна.
+        """
         from java.util import ArrayList
         from org.telegram.tgnet import TLRPC
 
         entities = ArrayList()
         for offset, length, uid, uname in spans:
-            try:
-                if uname:
-                    entity = TLRPC.TL_messageEntityMention()
-                else:
-                    entity = TLRPC.TL_messageEntityMentionName()
-                    entity.user_id = int(uid)
-                entity.offset = int(offset)
-                entity.length = int(length)
-                entities.add(entity)
-            except Exception as exc:
-                self._journal_tell("entity_skip %s" % (exc,))
+            if uname:
+                entity = TLRPC.TL_messageEntityMention()
+            else:
+                entity = TLRPC.TL_inputMessageEntityMentionName()
+                input_user = input_users.get(int(uid))
+                if input_user is None or isinstance(
+                        input_user, TLRPC.TL_inputUserEmpty):
+                    raise ValueError("no InputUser for id %d" % int(uid))
+                entity.user_id = input_user
+            entity.offset = int(offset)
+            entity.length = int(length)
+            entities.add(entity)
         return entities
 
     def on_send_message_hook(self, account: int, params: Any):
@@ -264,28 +270,30 @@ class MentionAllPlugin(BasePlugin):
         if ts is not None and time.monotonic() - ts < _FAIL_TTL:
             return None
 
-        members = self._cached_members(account, int(params.peer))
-        if members is None:
+        cached = self._cached_members(account, int(params.peer))
+        if cached is None:
             # Список участников приходит из сети: отменяем отправку, собираем
             # и переотправляем. Переотправка снова проходит этот хук — уже с
             # тёплым кэшем, то есть ниже, штатным MODIFY.
             self._mention_all(account, params, field, text)
             return HookResult(strategy=HookStrategy.CANCEL)
 
-        return self._apply(account, params, field, text, members)
+        members, input_users = cached
+        return self._apply(account, params, field, text, members, input_users)
 
-    def _apply(self, account: int, params: Any, field: str, text: str, members):
+    def _apply(self, account: int, params: Any, field: str, text: str,
+               members, input_users):
         """Один проход: подменить текст и entities прямо в params и вернуть
         MODIFY. Java читает entities из params уже после хука, поэтому это
         штатный путь клиента — без переотправки и без позиционных overload'ов."""
         try:
             new_text, spans = build_mentions(text, members, self._limit())
+            if not spans or not new_text.strip():
+                return None
+            entities = self._entities(spans, input_users)
         except Exception as exc:
-            self._journal_tell("build %s" % (exc,))
+            self._journal_tell("entity_build %s" % (exc,))
             return None
-        if not spans or not new_text.strip():
-            return None  # упоминать некого — пусть уходит как напечатано
-        entities = self._entities(spans)
         setattr(params, field, new_text)
         if entities.size() > 0:
             params.entities = entities
@@ -293,8 +301,10 @@ class MentionAllPlugin(BasePlugin):
                  % (len(spans), utf16len(new_text)))
         # inv — сколько в итоговом тексте невидимых символов: если не ноль,
         # значит в имя всё ещё пролезло что-то невидимое
-        self._journal_tell("modify n %d e %d len %d inv %d"
-                           % (len(spans), entities.size(), utf16len(new_text),
+        input_count = sum(1 for _, _, _, uname in spans if not uname)
+        self._journal_tell("modify n %d e %d input %d len %d inv %d"
+                           % (len(spans), entities.size(), input_count,
+                              utf16len(new_text),
                               sum(1 for ch in new_text if is_invisible(ch))))
         return HookResult(strategy=HookStrategy.MODIFY, params=params)
 
@@ -434,17 +444,21 @@ class MentionAllPlugin(BasePlugin):
                        tag="members_request")
             return
 
-        from client_utils import get_user_config
+        from client_utils import get_messages_controller, get_user_config
 
         try:
             me = int(get_user_config(account).getClientUserId())
+            mc = get_messages_controller(account)
             entries = []
+            input_users = {}
             for user in users:
                 uid = int(user.id)
                 uname = (user.username or "").strip()
                 name = clean_label((user.first_name or "") +
                                    ((" " + user.last_name)
                                     if user.last_name else ""))
+                if not uname:
+                    input_users[uid] = mc.getInputUser(user)
                 # пустое имя не повод выкидывать человека: в build_mentions
                 # он получит видимую подпись «Участник N» и всё равно пинг
                 entries.append((uid, uname, name,
@@ -474,8 +488,8 @@ class MentionAllPlugin(BasePlugin):
                            "лимит %d" % (len(users), len(members), limit),
                            field, text, tag="no_members")
                 return
-            self._members[(account, int(params.peer))] = (time.monotonic(),
-                                                          members)
+            self._members[(account, int(params.peer))] = (
+                time.monotonic(), members, input_users)
             self.log("mention-all: %d mentions, message length %d"
                      % (len(spans), utf16len(new_text)))
             # Переотправка снова проходит хук — кэш тёплый, и там сработает

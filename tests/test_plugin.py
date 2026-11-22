@@ -71,17 +71,28 @@ class _Mention:
         self.offset = self.length = 0
 
 
-class _MentionName:
-    kind = "mentionName"
+class _InputUser:
+    def __init__(self, user_id, access_hash):
+        self.user_id, self.access_hash = user_id, access_hash
+
+
+class _InputMentionName:
+    kind = "inputMessageEntityMentionName"
 
     def __init__(self):
-        self.offset = self.length = self.user_id = 0
+        self.offset = self.length = 0
+        self.user_id = None
+
+
+class _InputUserEmpty:
+    pass
 
 
 tgnet = types.ModuleType("org.telegram.tgnet")
 tgnet.TLRPC = types.SimpleNamespace(
     TL_messageEntityMention=_Mention,
-    TL_messageEntityMentionName=_MentionName)
+    TL_inputMessageEntityMentionName=_InputMentionName,
+    TL_inputUserEmpty=_InputUserEmpty)
 for name in ("org", "org.telegram"):
     sys.modules[name] = types.ModuleType(name)
 sys.modules.update({"java": types.ModuleType("java"), "java.util": java_util,
@@ -188,9 +199,10 @@ client_utils = types.ModuleType("client_utils")
 
 
 class _User:
-    def __init__(self, uid, username="", first_name=""):
+    def __init__(self, uid, username="", first_name="", access_hash=1000):
         self.id, self.username, self.first_name = uid, username, first_name
         self.last_name = ""
+        self.access_hash = access_hash
 
 
 class _MC:
@@ -203,6 +215,11 @@ class _MC:
         if int(uid) == 0:
             return _User(8617084680, "", "")  # как MessagesController
         return self.cache.get(int(uid))
+
+    def getInputUser(self, user):
+        if user is None:
+            return _InputUserEmpty()
+        return _InputUser(user.id, user.access_hash)
 
 
 client_utils.get_messages_controller = lambda account=None: _MC(
@@ -256,22 +273,36 @@ assert not seen  # и даже не пытаемся собрать участн
 
 mod.MentionAllPlugin._recent_fail.clear()
 mod.MentionAllPlugin._members[(7, -123)] = (
-    time.monotonic(), [(5, "ann_x", "Ann"), (6, "", "Bob")])
+    time.monotonic(),
+    [(5, "ann_x", "Ann"), (6, "", "Bob"), (7, "", "Cara")],
+    {6: _InputUser(6, 606), 7: _InputUser(7, 707)})
 p = Params(-123, "hi @all")
 res = plugin.on_send_message_hook(7, p)
 # штатный путь клиента: тот же объект params, стратегия MODIFY
 assert res is not None and res.strategy == mod.HookStrategy.MODIFY
 assert res.params is p
-assert p.message == "hi @ann_x Bob", p.message
+assert p.message == "hi @ann_x Bob Cara", p.message
 ents = p.entities
-assert ents.size() == 2, ents
+assert ents.size() == 3, ents
 assert ents[0].kind == "mention" and ents[0].offset == 3 and ents[0].length == 6
-assert ents[1].kind == "mentionName" and ents[1].offset == 10
-assert ents[1].length == 3 and ents[1].user_id == 6
+assert ents[1].kind == "inputMessageEntityMentionName" and ents[1].offset == 10
+assert ents[1].length == 3
+assert ents[1].user_id.user_id == 6 and ents[1].user_id.access_hash == 606
+assert ents[2].kind == "inputMessageEntityMentionName" and ents[2].offset == 14
+assert ents[2].length == 4
+assert ents[2].user_id.user_id == 7 and ents[2].user_id.access_hash == 707
+
+# If an unnamed member has no resolvable InputUser, don't silently send only
+# the username-based subset as if everyone were mentioned.
+incomplete = Params(-123, "hi @all")
+assert plugin._apply(7, incomplete, "message", incomplete.message,
+                     [(5, "ann_x", "Ann"), (6, "", "Bob")],
+                     {}) is None
+assert incomplete.message == "hi @all"
 
 # просроченный кэш не используется: отправка снова отменяется на сбор
 mod.MentionAllPlugin._members[(7, -123)] = (
-    time.monotonic() - 10_000, [(5, "ann_x", "Ann")])
+    time.monotonic() - 10_000, [(5, "ann_x", "Ann")], {})
 assert plugin.on_send_message_hook(7, Params(-123, "@all")).strategy == (
     mod.HookStrategy.CANCEL)
 mod.MentionAllPlugin._members.clear()
