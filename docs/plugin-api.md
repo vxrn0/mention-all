@@ -33,6 +33,12 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
   overload: 14 positional arguments are not marshalled reliably through
   Chaquopy, and a cancelled send loses the text the user typed. Chaquopy does
   not convert a Python list into the Java field: build a `java.util.ArrayList`.
+- **Names can be invisible.** A Telegram profile can have a first name that is
+  only variation selectors or format characters (`U+FE0E` is the common one).
+  Such a name is non-empty as a string but renders as nothing, so a
+  `mentionName` built on it turns into blank space. Strip `Cf`/`Cc`/`Cs`/`Co`
+  and variation selectors before using a name as mention text, and fall back to
+  a visible label when nothing is left; the entity keeps pinging.
 - **Cache what the hook needs.** The hook is synchronous, participants come
   from the network. Fetch them on the first `@all`, keep them per
   `(account, peer)` with a TTL, cancel that one send while fetching, then
