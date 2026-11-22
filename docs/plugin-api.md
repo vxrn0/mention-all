@@ -39,7 +39,8 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
   Such a name is non-empty as a string but renders as nothing, so a
   `mentionName` built on it turns into blank space. Strip `Cf`/`Cc`/`Cs`/`Co`
   and variation selectors before using a name as mention text, and fall back to
-  a visible label when nothing is left; the entity keeps pinging.
+  a visible label containing the user ID when nothing is left; the entity
+  keeps targeting that user.
 - **Cache what the hook needs.** The hook is synchronous, participants come
   from the network. Fetch them on the first `@all`, keep them per
   `(account, peer)` with a TTL, cancel that one send while fetching, then
