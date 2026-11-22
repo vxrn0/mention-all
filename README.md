@@ -12,7 +12,8 @@ a username, via text-mention entities. Telegram itself has no such feature.
   left alone.
 - Works in basic groups and supergroups, in message text and media captions.
 - Members with a username are mentioned as `@username`; the rest get a
-  text mention on their name.
+  text mention on their name. A name made only of invisible characters (a
+  hidden-profile trick) is labelled `Участник N`, and the mention still pings.
 - Skips you, bots and deleted accounts.
 - Adjustable mention cap (default 100) for large groups.
 - If the member list cannot be fetched, your message is sent as typed —
@@ -24,7 +25,7 @@ a username, via text-mention entities. Telegram itself has no such feature.
 - Plugin SDK `>= 1.4.5.3`
 - Permissions: `messages.send` (outgoing-message hook, resend), `network`
   (TL request for the member list)
-- Version `1.2.1`
+- Version `1.2.2`
 
 ## Install
 
