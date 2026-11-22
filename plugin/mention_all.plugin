@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -187,7 +187,7 @@ class MentionAllPlugin(BasePlugin):
             if chat is None:
                 self._fail(account, params,
                            "чат не найден (peer=%s, chat_id=%s)" % (peer, chat_id),
-                           field, text)
+                           field, text, tag="chat_not_found")
                 return
             self.log("mention-all: peer=%s chat_id=%s supergroup=%s"
                      % (peer, chat_id, bool(chat.megagroup or chat.gigagroup)))
@@ -218,7 +218,8 @@ class MentionAllPlugin(BasePlugin):
 
                 send_request(req, full_done, account=account)
         except Exception as exc:
-            self._fail(account, params, "ошибка запуска: %r" % (exc,), field, text)
+            self._fail(account, params, "ошибка запуска: %r" % (exc,), field, text,
+                       tag="start")
 
     def _supergroup_members(self, account: int, chat_id: int, access_hash: int,
                             limit: int, on_done, offset: int = 0,
@@ -282,7 +283,8 @@ class MentionAllPlugin(BasePlugin):
                 users, error):
         if error is not None or not users:
             self._fail(account, params, "не получить список участников (%s)"
-                       % (_error_text(error) or "пусто"), field, text)
+                       % (_error_text(error) or "пусто"), field, text,
+                       tag="members_request")
             return
 
         from java.util import ArrayList
@@ -290,21 +292,28 @@ class MentionAllPlugin(BasePlugin):
         from org.telegram.tgnet import TLRPC
 
         try:
-            me = get_user_config(account).getClientUserId()
-            members = []
+            me = int(get_user_config(account).getClientUserId())
+            people, others = [], []
             for user in users:
-                # без себя, ботов и удалённых — их упоминание не имеет смысла
-                if user.id == me or user.bot or user.deleted:
+                uid = int(user.id)
+                if uid == me:
                     continue
                 name = (user.first_name or "") + \
                     ((" " + user.last_name) if user.last_name else "")
-                members.append((int(user.id),
-                                (user.username or "").strip(), name.strip()))
+                entry = (uid, (user.username or "").strip(), name.strip())
+                # боты и удалённые — в резерв: если живых людей нет, лучше
+                # упомянуть их, чем не отправить сообщение вовсе
+                (others if (user.bot or user.deleted) else people).append(entry)
+            members = people or others
 
-            new_text, spans = build_mentions(text, members, self._limit())
+            limit = self._limit()
+            new_text, spans = build_mentions(text, members, limit)
             if not spans:
-                self._fail(account, params, "некого упоминать (только вы, "
-                           "боты и удалённые)", field, text)
+                self._fail(account, params,
+                           "некого упоминать: получено %d, людей %d, "
+                           "ботов/удалённых %d, лимит %d"
+                           % (len(users), len(people), len(others), limit),
+                           field, text, tag="no_members")
                 return
             # entities обоих видов строим сами: @username — mention,
             # без юзернейма — mentionName по user_id
@@ -323,13 +332,15 @@ class MentionAllPlugin(BasePlugin):
             self._resend(account, params, field, new_text, entities)
         except Exception as exc:
             self._fail(account, params, "сборка упоминаний: %r" % (exc,),
-                       field, text)
+                       field, text, tag="build")
 
     def _fail(self, account: int, params: Any, reason: str,
-              field: Optional[str] = None, text: Optional[str] = None):
+              field: Optional[str] = None, text: Optional[str] = None,
+              tag: str = "fail"):
         """Сбой: показать причину один раз и отправить без повторного входа."""
         self.log("mention-all FAIL: " + reason)
-        self._journal_tell(reason)
+        # tag — латиницей: кириллицу журнал не примет (см. _journal_tell)
+        self._journal_tell("%s %s" % (tag, reason))
         # диалог, а не бюллетень: остаётся на экране, пока пользователь не
         # закроет — текст ошибки теперь реально можно прочитать
         self._alert("Mention All", reason + "\n\n" + self._check_report())
@@ -344,7 +355,9 @@ class MentionAllPlugin(BasePlugin):
 
     def _journal_tell(self, text: str):
         """Причину сбоя — в журнал активности: его стабильно смотрят и
-        скринят, в отличие от диалога.
+        скринят, в отличие от диалога. Кириллица в имени модуля недопустима,
+        поэтому в журнал попадает только латинская часть — ASCII-тег из
+        _fail и числа; русский текст причины остаётся в диалоге.
         shortcut: хак через импорт-событие audit-гейта, убрать, когда ошибки уйдут."""
         safe = re.sub(r"[^0-9A-Za-z]+", "_", str(text)).strip("_")[:120]
         if not safe:
