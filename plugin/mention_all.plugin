@@ -13,7 +13,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Пишете @all в группе — плагин отмечает всех её участников"
 __author__ = "@vxrn0"
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
@@ -95,17 +95,14 @@ def build_mentions(text: str, members: List[Tuple[int, Optional[str], str]],
     pieces = []
     spans = []
     pos = utf16len(text[:match.start()])
-    placeholder = 0
     for uid, uname, name in picked:
         if uname:
             span = "@" + uname
         else:
             # имя может быть невидимым (профиль без видимых символов):
-            # text_mention нужен видимый текст, иначе выходят пробелы
-            span = name
-            if not span:
-                placeholder += 1
-                span = "Участник %d" % placeholder
+            # text_mention нужен видимый текст — показываем точный ID вместо
+            # произвольного номера, чтобы можно было различить получателей.
+            span = name or ("Без имени · %d" % uid)
         pieces.append(span)
         spans.append((pos, utf16len(span), uid, uname or None))
         pos += utf16len(span) + 1  # разделительный пробел
@@ -459,8 +456,8 @@ class MentionAllPlugin(BasePlugin):
                                     if user.last_name else ""))
                 if not uname:
                     input_users[uid] = mc.getInputUser(user)
-                # пустое имя не повод выкидывать человека: в build_mentions
-                # он получит видимую подпись «Участник N» и всё равно пинг
+                # пустое имя не повод выкидывать человека: build_mentions
+                # покажет «Без имени · ID», сохранив entity на этого человека
                 entries.append((uid, uname, name,
                                 bool(user.bot or user.deleted)))
             members, self_filter_ate_all = pick_members(entries, me)

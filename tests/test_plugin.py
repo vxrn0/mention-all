@@ -341,8 +341,8 @@ assert label("सचिन") == "सचिन"              # комбиниру
 
 # имя из одних невидимых символов -> видимая подпись, но пинг сохраняется
 text, spans = build("@all", [(1, None, "\ufe0e"), (2, None, "\ufe0e"), (3, "ann", "Ann")], 100)
-assert text == "Участник 1 Участник 2 @ann", repr(text)
-assert spans == [(0, 10, 1, None), (11, 10, 2, None), (22, 4, 3, "ann")], spans
+assert text == "Без имени · 1 Без имени · 2 @ann", repr(text)
+assert spans == [(0, 13, 1, None), (14, 13, 2, None), (28, 4, 3, "ann")], spans
 
 # обычное имя остаётся как было
 assert build("@all", [(1, None, "Ann")], 100)[0] == "Ann"
