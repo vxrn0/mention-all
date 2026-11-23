@@ -17,11 +17,18 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
 - **Java method hooks (exteraless).** `BasePlugin.hook_method((class_name,
   method_name), before=callback, after=callback)` accepts a dotted class name;
   callbacks receive a `MethodHookParam` (`thisObject`, `args`, `result`) and
-  `param.setResult(...)` can replace or skip the original call. The
-  `MentionsAdapter` autocomplete inserts a `String` into its username results
-  and renders it in the normal mention cell; selecting it follows
-  `ChatActivity`'s normal text-replacement path. This hook surface is verified
-  only against exteraless.
+  `param.setResult(...)` can replace or skip the original call.
+  - `MentionsAdapter`: `TLRPC.Chat` has no `.channel` field — check group vs
+    broadcast channel with `ChatObject.isChannelAndNotMegaGroup(chat)`. Insert
+    a synthetic `TLRPC.TL_user` (`username = "all"`) into `showUsersResult`'s
+    `ArrayList<TLObject>` so `MentionCell.setUser` and `ChatActivity`'s tap
+    handler work natively without casting issues.
+  - `MessageObject`: hook `setType`, `generateLayout`, and `generateCaption`
+    to display `@all` locally on outgoing messages while keeping
+    `messageOwner.message` / `messageOwner.entities` intact for the server.
+    Normalize `dialog_id` via `chat_id_from_dialog` because `SendMessageParams`
+    and `MessageObject.getDialogId()` can represent supergroups differently.
+  - These hook surfaces are verified only against exteraless.
 - **Outgoing messages.** `on_send_message_hook(account, params)` fires from
   `SendMessagesHelper.sendMessage` with the live
   `SendMessagesHelper.SendMessageParams`. Return

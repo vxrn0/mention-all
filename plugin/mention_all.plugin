@@ -1,25 +1,31 @@
-# Mention All — плагин exteraless / exteraGram
-#
-# Заменяет @all в вашем сообщении на упоминания всех участников группы
-# (text_mention: пингуется каждый, даже без юзернейма).
-#
-# Разрешения: messages.send (хук исходящих + повторная отправка),
-# network (TL-запрос списка участников).
-#
-# Любой сбой показывается бюллетенем с именем шага — иначе молчаливый
-# отказ не отличить от «плагин не работает».
+"""Mention All — exteraGram / exteraless / AyuGram plugin.
+
+Replaces @all in outgoing group messages with mentions of every group member
+(using text-mention entities for members without a username) while keeping
+the local frontend message displayed as @all for the sender.
+
+Permissions:
+- messages.send: outgoing-message hook and resend after member fetch.
+- network: TL request for group participants.
+- hooks: @all mention autocomplete (MentionsAdapter) and local frontend
+  display masking (MessageObject).
+"""
 
 __id__ = "mention_all"
 __name__ = "Mention All"
-__description__ = "Пишете @all в группе — плагин отмечает всех её участников"
+__description__ = "Type @all in a group to mention every member."
 __author__ = "@vxrn0"
-__version__ = "1.3.0"
+__version__ = "1.4.0"
+__icon__ = "exteraPlugins/1"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
 __sdk_version__ = ">=1.4.5.3"
 __permissions__ = ["messages.send", "network", "hooks"]
 
+import hashlib
+import json
 import re
+import threading
 import time
 import unicodedata
 from typing import Any, List, Optional, Tuple
@@ -27,31 +33,33 @@ from typing import Any, List, Optional, Tuple
 from base_plugin import BasePlugin, HookResult, HookStrategy
 from ui.settings import Header, Input, Switch, Text
 
-# @all отдельным словом, не внутри @username и не @@all
+# Standalone @all token, never matching inside @username or @@all.
 TOKEN_RE = re.compile(r"(?<![\w@])@all(?!\w)", re.IGNORECASE)
-# уборка повторных токенов: съедает и пробел перед ними, чтобы не плодить дыры
+# Removes duplicate tokens along with one preceding space to avoid gaps.
 TOKEN_CLEAN = re.compile(r"\s?(?<![\w@])@all(?!\w)", re.IGNORECASE)
 
 SUPERGROUP_FLAG = -1000000000000
 
-# сколько секунд после сбоя не пытаться снова на том же тексте
-_FAIL_TTL = 60.0
-# сколько секунд держать список участников чата
-_MEMBERS_TTL = 600.0
+_FAIL_TTL = 60.0       # seconds to bypass re-trying the same failed text
+_MEMBERS_TTL = 600.0   # seconds to cache group members per (account, peer)
+_ALL_USER_ID = -5      # synthetic TL_user id for the @all autocomplete row
+_MASK_LIMIT = 200      # max persisted (chat_id, expanded_text) -> @all entries
+_MASK_KEY = "_masked_map"
 
 
 def is_invisible(ch: str) -> bool:
-    """Символ, который не видно: вариационные селекторы, форматирующие,
-    управляющие. В Telegram имя профиля можно поставить целиком из таких —
-    тогда упоминание выглядит пустым (1.2.1 на устройстве: U+FE0E)."""
+    """Return True for invisible format/control/variation-selector characters.
+
+    Telegram allows profile names made solely of such characters (e.g. U+FE0E),
+    which render as empty text under a mentionName entity.
+    """
     if "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef":
         return True
     return unicodedata.category(ch) in ("Cf", "Cc", "Cs", "Co")
 
 
 def clean_label(name: str) -> str:
-    """Имя без невидимых символов, с схлопнутыми пробелами.
-    Комбинирующие знаки (Mn) не трогаем — они нужны живым письменностям."""
+    """Strip invisible characters and collapse whitespace, keeping combining marks."""
     kept = []
     for ch in name or "":
         if is_invisible(ch):
@@ -61,34 +69,38 @@ def clean_label(name: str) -> str:
 
 
 def utf16len(s: str) -> int:
-    # Telegram считает offsets в кодовых единицах UTF-16
+    # Telegram entity offsets and lengths use UTF-16 code units.
     return len(s.encode("utf-16-le")) // 2
 
 
 def chat_id_from_dialog(dialog_id: int) -> Optional[int]:
-    """dialog_id -> id чата; None для личок и каналов-без-переписки."""
+    """Convert dialog_id to a positive chat/channel id, or None for DMs."""
     if SUPERGROUP_FLAG < dialog_id < 0:
-        return -dialog_id  # базовая группа
+        return -dialog_id
     if dialog_id <= SUPERGROUP_FLAG:
-        return -dialog_id + SUPERGROUP_FLAG  # супергруппа
+        return -dialog_id + SUPERGROUP_FLAG
     return None
 
 
+def mask_key(chat_id: int, expanded_text: str) -> str:
+    """Compact deterministic key mapping a sent expanded message back to @all."""
+    raw = "%d\0%s" % (int(chat_id), expanded_text)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
 def build_mentions(text: str, members: List[Tuple[int, Optional[str], str]],
-                   limit: int) -> Tuple[str, List[Tuple[int, int, int, Optional[str]]]]:
-    """Заменить первый @all на упоминания участников, остальные токены убрать.
+                   limit: int, unnamed_label: str = "Unnamed"
+                   ) -> Tuple[str, List[Tuple[int, int, int, Optional[str]]]]:
+    """Replace the first @all with member mentions and strip duplicate tokens.
 
-    members: [(user_id, username|None, имя)]. Участник с юзернеймом пишется
-    как @username (сервер распознаёт упоминание сам), без юзернейма — именем
-    (для него вызывающий строит text_mention).
-
-    Возвращает (новый_текст, [(offset_utf16, length_utf16, user_id,
-    username|None), ...]).
+    members: [(user_id, username|None, display_name)]. Members with a username
+    use @username; others use their display name with a text-mention entity.
+    Returns (new_text, [(offset_utf16, length_utf16, user_id, username|None)]).
     """
     match = TOKEN_RE.search(text)
     if match is None or not members:
         return text, []
-    # имя может содержать @all — вырезаем, иначе повторный хук зациклит отправку
+    # Strip @all from display names so the resend hook cannot loop.
     picked = [(uid, (uname or "").strip(), TOKEN_CLEAN.sub("", name))
               for uid, uname, name in members[:max(0, limit)]]
     pieces = []
@@ -99,26 +111,22 @@ def build_mentions(text: str, members: List[Tuple[int, Optional[str], str]],
             span = "@" + uname
         else:
             name = clean_label(raw_name)
-            # Пробельные имена допустимы: ручное упоминание — entity поверх
-            # тех же пробелов. ID нужен только для пустого/невидимого имени.
+            # Keep literal whitespace names; only invisible/empty names get an ID label.
             span = name or (raw_name if raw_name and raw_name.isspace()
-                            else "Без имени · %d" % uid)
+                            else "%s · %d" % (unnamed_label, uid))
         pieces.append(span)
         spans.append((pos, utf16len(span), uid, uname or None))
-        pos += utf16len(span) + 1  # разделительный пробел
+        pos += utf16len(span) + 1
     new_text = text[:match.start()] + " ".join(pieces) \
         + TOKEN_CLEAN.sub("", text[match.end():])
     return new_text, spans
 
 
 def pick_members(entries: List[Tuple[int, str, str, bool]], me: int):
-    """Отобрать, кого упоминать.
+    """Select who to mention: live humans first, then bots/deleted, else all.
 
-    entries: [(user_id, username, имя, бот_или_удалён)]. Сначала живые люди,
-    иначе боты/удалённые, иначе все. Третий вариант — страховка: сравнение
-    id с собой в клиенте врёт и однажды съело весь список (1.1.3).
-
-    Возвращает ([(user_id, username, имя), ...], фильтр_себя_съел_всё).
+    entries: [(user_id, username, name, is_bot_or_deleted)]. The final fallback
+    guards against mismatched self-ID comparisons eating the whole list.
     """
     people = [e for e in entries if e[0] != me and not e[3]]
     others = [e for e in entries if e[0] != me and e[3]]
@@ -129,22 +137,19 @@ def pick_members(entries: List[Tuple[int, str, str, bool]], me: int):
 
 
 def fallback_text(text: str) -> str:
-    """Текст для отправки после сбоя: без токена @all, но никогда не пустой —
-    пустой пузырь хуже, чем сообщение с токеном (баг 1.1.4)."""
+    """Text to send after a failure: without @all, but never blank."""
     stripped = TOKEN_CLEAN.sub("", text).strip()
     return stripped or text
 
 
 def _error_text(error) -> str:
-    """TL_error или исключение — читаемая строка."""
     if error is None:
         return ""
     return str(getattr(error, "text", None) or error)
 
 
 def _jlist(java_list) -> list:
-    """Java-список в питоновский: итерация по прокси не работает
-    (TypeError 'ArrayList' object is not iterable), индексы — работают."""
+    """Convert a Java List proxy to a Python list via indexed access."""
     out = []
     if java_list is None:
         return out
@@ -154,7 +159,7 @@ def _jlist(java_list) -> list:
 
 
 def is_all_suggestion_prefix(text: str) -> bool:
-    """Whether the current @-mention token can still become @all."""
+    """Return True when the active @-mention token before cursor matches @all."""
     at = text.rfind("@")
     if at < 0 or (at > 0 and text[at - 1] not in " \n"):
         return False
@@ -162,33 +167,32 @@ def is_all_suggestion_prefix(text: str) -> bool:
 
 
 class MentionAllPlugin(BasePlugin):
-    # (peer, текст) -> время сбоя; класс, а не экземпляр: защёлка должна
-    # переживать перезагрузку плагина в живом процессе
+    # Class-level state survives in-process plugin reloads.
     _recent_fail = {}
-    # (account, peer) -> (время сбора, участники, InputUser по id):
-    # хук синхронный, а участники приходят из сети — без кэша entities
-    # не собрать в том же вызове, в котором клиент читает params
     _members = {}
-    # одна диагностическая строка в журнал за запуск процесса
-    _diag_done = False
+    _masked = {}
+    _masked_loaded = False
 
     def on_plugin_load(self):
+        self._local = threading.local()
         self.add_on_send_message_hook()
-        self._register_autocomplete_hooks()
-        self.log("mention-all loaded, hook registered")
-
-    def _register_autocomplete_hooks(self):
-        """Add one selectable @all row to the standard mention adapter."""
-        adapter = "org.telegram.ui.Adapters.MentionsAdapter"
-        hooks = (
+        self._ensure_masked_loaded()
+        self._register_hook_group("mention autocomplete", "org.telegram.ui.Adapters.MentionsAdapter", (
             ("searchUsernameOrHashtag", self._before_mention_search, None),
             ("showUsersResult", self._before_show_users_result, None),
-            ("onBindViewHolder", self._before_mention_bind, None),
-        )
+        ))
+        self._register_hook_group("message masking", "org.telegram.messenger.MessageObject", (
+            ("setType", None, self._after_message_set_type),
+            ("generateLayout", self._before_message_layout, self._after_message_layout),
+            ("generateCaption", self._before_message_caption, self._after_message_caption),
+        ))
+        self.log("mention-all loaded")
+
+    def _register_hook_group(self, label: str, class_name: str, hooks):
         installed = []
         try:
             for method, before, after in hooks:
-                hook = self.hook_method((adapter, method), before=before, after=after)
+                hook = self.hook_method((class_name, method), before=before, after=after)
                 if hook is None:
                     raise RuntimeError("could not hook " + method)
                 installed.append(hook)
@@ -198,7 +202,32 @@ class MentionAllPlugin(BasePlugin):
                     self.unhook_method(hook)
                 except Exception:
                     pass
-            self.log("mention autocomplete unavailable: %s" % exc)
+            self.log("%s unavailable: %s" % (label, exc))
+
+    # ---- localization (English default, Russian when client language is ru) ----
+
+    def _app_language(self) -> str:
+        try:
+            from org.telegram.messenger import LocaleController
+            code = str(LocaleController.getLocaleStringIso639() or "en").lower()
+        except Exception:
+            code = "en"
+        return "ru" if code.split("-")[0].split("_")[0] == "ru" else "en"
+
+    def _text(self, english: str, russian: str) -> str:
+        return russian if self._app_language() == "ru" else english
+
+    # ---- @all mention autocomplete ----
+
+    def _is_group_chat(self, chat) -> bool:
+        if chat is None:
+            return False
+        try:
+            from org.telegram.messenger import ChatObject
+            return not bool(ChatObject.isChannelAndNotMegaGroup(chat))
+        except Exception:
+            return not (bool(getattr(chat, "broadcast", False))
+                        and not bool(getattr(chat, "megagroup", False)))
 
     def _set_all_suggestion(self, adapter, enabled: bool):
         try:
@@ -225,6 +254,18 @@ class MentionAllPlugin(BasePlugin):
         except Exception:
             return False
 
+    def _all_suggestion_user(self):
+        """Synthetic TL_user so MentionCell and ChatActivity handle @all natively."""
+        from org.telegram.tgnet import TLRPC
+
+        user = TLRPC.TL_user()
+        user.id = _ALL_USER_ID
+        user.username = "all"
+        user.first_name = self._text("Mention everyone", "Упомянуть всех")
+        user.bot = False
+        user.self = False
+        return user
+
     def _before_mention_search(self, param):
         adapter = param.thisObject
         enabled = False
@@ -240,10 +281,11 @@ class MentionAllPlugin(BasePlugin):
                     prefix = str(text.subSequence(0, end))
                 except Exception:
                     prefix = str(text)[:end]
-                fragment = adapter.parentFragment
+                fragment = getattr(adapter, "parentFragment", None)
                 chat = fragment.getCurrentChat() if fragment is not None else None
-                enabled = (chat is not None
-                           and not (bool(chat.channel) and not bool(chat.megagroup))
+                if chat is None:
+                    chat = getattr(adapter, "chat", None)
+                enabled = (self._is_group_chat(chat)
                            and is_all_suggestion_prefix(prefix))
         except Exception as exc:
             self.log("mention autocomplete search failed: %s" % exc)
@@ -254,63 +296,183 @@ class MentionAllPlugin(BasePlugin):
             return
         try:
             results = param.args[0]
-            if results.size() == 0 or str(results.get(0)) != "@all":
-                results.add(0, "@all")
+            if results is None:
+                return
+            if results.size() == 0 or int(getattr(results.get(0), "id", 0)) != _ALL_USER_ID:
+                results.add(0, self._all_suggestion_user())
         except Exception as exc:
             self.log("mention autocomplete result failed: %s" % exc)
 
-    def _before_mention_bind(self, param):
+    # ---- frontend masking (show @all locally while sending full mentions) ----
+
+    def _ensure_masked_loaded(self) -> bool:
+        if MentionAllPlugin._masked_loaded:
+            return bool(MentionAllPlugin._masked)
+        MentionAllPlugin._masked_loaded = True
         try:
-            position = int(param.args[1])
-            item = param.thisObject.getItem(position)
-            if str(item) == "@all":
-                param.args[0].itemView.setText("@all — mention everyone")
-                param.result = None
+            raw = self.get_setting(_MASK_KEY, "")
+            if isinstance(raw, str) and raw:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(k, str) and isinstance(v, str):
+                            MentionAllPlugin._masked[k] = v
         except Exception as exc:
-            self.log("mention autocomplete row failed: %s" % exc)
+            self.log("masked map load failed: %s" % exc)
+        return bool(MentionAllPlugin._masked)
+
+    def _remember_mask(self, peer: int, expanded_text: str, original_text: str):
+        cid = chat_id_from_dialog(int(peer))
+        if cid is None or not expanded_text or not original_text:
+            return
+        self._ensure_masked_loaded()
+        key = mask_key(cid, expanded_text)
+        MentionAllPlugin._masked.pop(key, None)
+        MentionAllPlugin._masked[key] = original_text
+        while len(MentionAllPlugin._masked) > _MASK_LIMIT:
+            oldest = next(iter(MentionAllPlugin._masked))
+            MentionAllPlugin._masked.pop(oldest, None)
+        try:
+            if hasattr(self, "set_setting"):
+                self.set_setting(_MASK_KEY, json.dumps(
+                    MentionAllPlugin._masked, ensure_ascii=False))
+        except Exception as exc:
+            self.log("masked map save failed: %s" % exc)
+
+    def _lookup_mask(self, msg) -> Optional[str]:
+        if not self._ensure_masked_loaded() or not self.get_setting("enabled", True):
+            return None
+        try:
+            owner = getattr(msg, "messageOwner", None)
+            if owner is None or not bool(getattr(owner, "out", False)):
+                return None
+            raw = getattr(owner, "message", None)
+            if not raw:
+                return None
+            cid = chat_id_from_dialog(int(msg.getDialogId()))
+            if cid is None:
+                return None
+            return MentionAllPlugin._masked.get(mask_key(cid, str(raw)))
+        except Exception:
+            return None
+
+    def _mask_stack(self, attr: str) -> list:
+        local = self.__dict__.get("_local")
+        if local is None:
+            local = threading.local()
+            self.__dict__["_local"] = local
+        stack = getattr(local, attr, None)
+        if stack is None:
+            stack = []
+            setattr(local, attr, stack)
+        return stack
+
+    def _after_message_set_type(self, param):
+        msg = param.thisObject
+        original = self._lookup_mask(msg)
+        if original is None:
+            return
+        try:
+            if str(getattr(msg, "messageText", "") or "") != original:
+                msg.messageText = original
+        except Exception as exc:
+            self.log("mask setType failed: %s" % exc)
+
+    def _before_message_layout(self, param):
+        msg = param.thisObject
+        original = self._lookup_mask(msg)
+        if original is None:
+            return
+        try:
+            from java.util import ArrayList
+            owner = msg.messageOwner
+            if str(getattr(msg, "messageText", "") or "") != original:
+                msg.messageText = original
+            self._mask_stack("layout_stack").append((msg, owner, owner.entities))
+            owner.entities = ArrayList()
+        except Exception as exc:
+            self.log("mask layout before failed: %s" % exc)
+
+    def _after_message_layout(self, param):
+        stack = self._mask_stack("layout_stack")
+        if not stack or stack[-1][0] is not param.thisObject:
+            return
+        _, owner, entities = stack.pop()
+        try:
+            owner.entities = entities
+        except Exception as exc:
+            self.log("mask layout after failed: %s" % exc)
+
+    def _before_message_caption(self, param):
+        msg = param.thisObject
+        original = self._lookup_mask(msg)
+        if original is None:
+            return
+        try:
+            from java.util import ArrayList
+            owner = msg.messageOwner
+            self._mask_stack("caption_stack").append(
+                (msg, owner, owner.message, owner.entities))
+            owner.message = original
+            owner.entities = ArrayList()
+        except Exception as exc:
+            self.log("mask caption before failed: %s" % exc)
+
+    def _after_message_caption(self, param):
+        stack = self._mask_stack("caption_stack")
+        if not stack or stack[-1][0] is not param.thisObject:
+            return
+        _, owner, message, entities = stack.pop()
+        try:
+            owner.message = message
+            owner.entities = entities
+        except Exception as exc:
+            self.log("mask caption after failed: %s" % exc)
+
+    # ---- settings and self-test ----
 
     def create_settings(self) -> List[Any]:
         return [
             Header(text="Mention All"),
-            Switch(key="enabled", text="Включить", default=True),
-            Input(key="limit", text="Максимум упоминаний", default="100",
-                  subtext="Ограничение на размер одного сообщения"),
-            Text(text="Самопроверка",
-                 subtext="Проверяет классы Telegram и разрешения плагина",
+            Switch(key="enabled",
+                   text=self._text("Enable", "Включить"),
+                   default=True),
+            Input(key="limit",
+                  text=self._text("Mention limit", "Максимум упоминаний"),
+                  default="100",
+                  subtext=self._text(
+                      "Maximum mentions per message",
+                      "Ограничение на размер одного сообщения")),
+            Text(text=self._text("Self-test", "Самопроверка"),
+                 subtext=self._text(
+                     "Check Telegram classes and plugin permissions",
+                     "Проверяет классы Telegram и разрешения плагина"),
                  on_click=self._self_test),
         ]
 
     def _self_test(self):
-        """Диагностика в один клик: называет сломанный шаг."""
         report = self._check_report()
         self.log("self-test: " + report)
-        self._alert("Mention All: проверка", report)
+        self._alert(
+            self._text("Mention All: self-test", "Mention All: проверка"),
+            report)
 
     def _check_report(self) -> str:
+        ok = self._text("ok", "ок")
+        tg_label = self._text("Telegram classes", "классы Telegram")
         checks = []
         try:
             from org.telegram.tgnet import TLRPC  # noqa: F401
-            checks.append("классы Telegram: ок")
+            checks.append("%s: %s" % (tg_label, ok))
         except Exception as exc:
-            checks.append("классы Telegram: %s" % (exc,))
-        try:
-            from client_utils import _require
-            _require("messages.send", "self-test")
-            checks.append("messages.send: ок")
-        except Exception as exc:
-            checks.append("messages.send: %s" % (exc,))
-        try:
-            from client_utils import _require
-            _require("network", "self-test")
-            checks.append("network: ок")
-        except Exception as exc:
-            checks.append("network: %s" % (exc,))
-        try:
-            from client_utils import _require
-            _require("hooks", "self-test")
-            checks.append("hooks: ок")
-        except Exception as exc:
-            checks.append("hooks: %s" % (exc,))
+            checks.append("%s: %s" % (tg_label, exc))
+        for perm in ("messages.send", "network", "hooks"):
+            try:
+                from client_utils import _require
+                _require(perm, "self-test")
+                checks.append("%s: %s" % (perm, ok))
+            except Exception as exc:
+                checks.append("%s: %s" % (perm, exc))
         return "\n".join(checks)
 
     def _limit(self) -> int:
@@ -319,10 +481,9 @@ class MentionAllPlugin(BasePlugin):
         except (TypeError, ValueError):
             return 100
 
-    # ---- хук исходящих ----
+    # ---- outgoing message hook ----
 
     def _cached_members(self, account: int, peer: int):
-        """Участники из кэша (свежие — не старше TTL), иначе None."""
         hit = self._members.get((account, peer))
         if hit is None:
             return None
@@ -333,13 +494,8 @@ class MentionAllPlugin(BasePlugin):
         return members, input_users
 
     def _entities(self, spans, input_users):
-        """Строит именно input-entities для исходящего запроса.
-
-        TL_inputMessageEntityMentionName + InputUser — тип, который использует
-        сам клиент при выборе человека без username из @-меню.
-        TL_messageEntityMentionName — серверная entity для уже отправленного
-        сообщения; для исходящего запроса она неверна.
-        """
+        """Build outgoing entities: TL_inputMessageEntityMentionName + InputUser
+        for members without a username, TL_messageEntityMention for @username."""
         from java.util import ArrayList
         from org.telegram.tgnet import TLRPC
 
@@ -362,14 +518,13 @@ class MentionAllPlugin(BasePlugin):
     def on_send_message_hook(self, account: int, params: Any):
         if not self.get_setting("enabled", True):
             return None
-        # shortcut: только текст и подписи, только группы; медиа без подписи мимо
+        # shortcut: text and captions in groups only; captionless media is untouched
         field = "message" if params.message else "caption" if params.caption else None
         if field is None or int(params.peer) >= 0:
             return None
         text = str(getattr(params, field))
         if not TOKEN_RE.search(text):
             return None
-        # уже падали на этом тексте — отправляем как напечатано, без цикла
         key = (int(params.peer), text)
         ts = self._recent_fail.get(key)
         if ts is not None and time.monotonic() - ts < _FAIL_TTL:
@@ -377,9 +532,6 @@ class MentionAllPlugin(BasePlugin):
 
         cached = self._cached_members(account, int(params.peer))
         if cached is None:
-            # Список участников приходит из сети: отменяем отправку, собираем
-            # и переотправляем. Переотправка снова проходит этот хук — уже с
-            # тёплым кэшем, то есть ниже, штатным MODIFY.
             self._mention_all(account, params, field, text)
             return HookResult(strategy=HookStrategy.CANCEL)
 
@@ -388,32 +540,26 @@ class MentionAllPlugin(BasePlugin):
 
     def _apply(self, account: int, params: Any, field: str, text: str,
                members, input_users):
-        """Один проход: подменить текст и entities прямо в params и вернуть
-        MODIFY. Java читает entities из params уже после хука, поэтому это
-        штатный путь клиента — без переотправки и без позиционных overload'ов."""
+        """Mutate params in place and return MODIFY so entities travel in the
+        standard client sendMessage path."""
         try:
-            new_text, spans = build_mentions(text, members, self._limit())
+            unnamed = self._text("Unnamed", "Без имени")
+            new_text, spans = build_mentions(text, members, self._limit(), unnamed)
             if not spans or not new_text.strip():
                 return None
             entities = self._entities(spans, input_users)
         except Exception as exc:
             self._journal_tell("entity_build %s" % (exc,))
             return None
+        self._remember_mask(int(params.peer), new_text, text)
         setattr(params, field, new_text)
         if entities.size() > 0:
             params.entities = entities
         self.log("mention-all: %d mentions, message length %d"
                  % (len(spans), utf16len(new_text)))
-        # inv — сколько в итоговом тексте невидимых символов: если не ноль,
-        # значит в имя всё ещё пролезло что-то невидимое
-        input_count = sum(1 for _, _, _, uname in spans if not uname)
-        self._journal_tell("modify n %d e %d input %d len %d inv %d"
-                           % (len(spans), entities.size(), input_count,
-                              utf16len(new_text),
-                              sum(1 for ch in new_text if is_invisible(ch))))
         return HookResult(strategy=HookStrategy.MODIFY, params=params)
 
-    # ---- сбор участников ----
+    # ---- member fetching ----
 
     def _mention_all(self, account: int, params: Any, field: str, text: str):
         from client_utils import get_messages_controller, send_request
@@ -424,12 +570,12 @@ class MentionAllPlugin(BasePlugin):
             chat_id = chat_id_from_dialog(peer)
             chat = get_messages_controller(account).getChat(chat_id) if chat_id else None
             if chat is None:
-                self._fail(account, params,
-                           "чат не найден (peer=%s, chat_id=%s)" % (peer, chat_id),
-                           field, text, tag="chat_not_found")
+                self._fail(
+                    account, params,
+                    self._text("chat not found (peer=%s, chat_id=%s)",
+                               "чат не найден (peer=%s, chat_id=%s)") % (peer, chat_id),
+                    field, text, tag="chat_not_found")
                 return
-            self.log("mention-all: peer=%s chat_id=%s supergroup=%s"
-                     % (peer, chat_id, bool(chat.megagroup or chat.gigagroup)))
 
             def done(users, error):
                 self._finish(account, params, field, text, users, error)
@@ -446,25 +592,24 @@ class MentionAllPlugin(BasePlugin):
                         users = []
                         if error is None and response is not None:
                             users = self._response_users(account, response.users)
+                        empty = self._text("member list is empty",
+                                           "список участников пуст")
                         done(users, error if error is not None
-                             else None if users else "список участников пуст")
+                             else None if users else empty)
                     except Exception as exc:
                         done(None, "getFullChat: %r" % (exc,))
 
                 send_request(req, full_done, account=account)
         except Exception as exc:
-            self._fail(account, params, "ошибка запуска: %r" % (exc,), field, text,
-                       tag="start")
+            self._fail(
+                account, params,
+                self._text("startup error: %r", "ошибка запуска: %r") % (exc,),
+                field, text, tag="start")
 
     def _response_users(self, account: int, response_users):
-        """Участники из поля users ответа, с уточнением юзернеймов из кэша.
+        """Read members from response.users and enrich usernames from cache.
 
-        В этом слое ChannelParticipant больше не имеет user_id (id лежит в
-        peer), поэтому participants не годятся: participant.user_id = 0, а
-        MessagesController.getUser(0) отдаёт ТЕКУЩЕГО пользователя, не None.
-        На устройстве (1.2.0) это дало пять «вас» и текст из пробелов.
-        Поэтому источник — response.users; кэш только уточняет юзернейм и
-        принимается лишь при совпадении id.
+        Skip id == 0: MessagesController.getUser(0) returns the current user.
         """
         from client_utils import get_messages_controller
 
@@ -479,7 +624,7 @@ class MentionAllPlugin(BasePlugin):
             except Exception:
                 continue
             if uid == 0:
-                continue  # пустышка, кэш по нулю вернёт текущего пользователя
+                continue
             cached = None
             if mc is not None:
                 try:
@@ -505,8 +650,6 @@ class MentionAllPlugin(BasePlugin):
             on_done(collected, None)
             return
         req = TLRPC.TL_channels_getParticipants()
-        # поле channel ждёт InputChannel; TL_inputPeerChannel — это InputPeer
-        # и не конвертируется (ошибка 1.0.3 на устройстве)
         req.channel = TLRPC.TL_inputChannel()
         req.channel.channel_id = int(chat_id)
         req.channel.access_hash = access_hash
@@ -517,11 +660,10 @@ class MentionAllPlugin(BasePlugin):
         def page_done(response, error):
             try:
                 if error is not None or response is None:
+                    empty = self._text("empty response", "пустой ответ")
                     on_done(collected, "getParticipants: %s"
-                            % (_error_text(error) or "пустой ответ"))
+                            % (_error_text(error) or empty))
                     return
-                # participants не используем: у ChannelParticipant в этом слое
-                # нет user_id (только peer) — см. _response_users
                 users = self._response_users(account, response.users)
                 collected.extend(users)
                 got = len(_jlist(response.participants))
@@ -539,14 +681,18 @@ class MentionAllPlugin(BasePlugin):
         except Exception as exc:
             on_done(collected, "getParticipants: %r" % (exc,))
 
-    # ---- сборка и повторная отправка ----
+    # ---- assembly and resend ----
 
     def _finish(self, account: int, params: Any, field: str, text: str,
                 users, error):
         if error is not None or not users:
-            self._fail(account, params, "не получить список участников (%s)"
-                       % (_error_text(error) or "пусто"), field, text,
-                       tag="members_request")
+            empty = self._text("empty", "пусто")
+            self._fail(
+                account, params,
+                self._text("could not fetch member list (%s)",
+                           "не получить список участников (%s)")
+                % (_error_text(error) or empty),
+                field, text, tag="members_request")
             return
 
         from client_utils import get_messages_controller, get_user_config
@@ -563,81 +709,55 @@ class MentionAllPlugin(BasePlugin):
                     ((" " + user.last_name) if user.last_name else "")
                 if not uname:
                     input_users[uid] = mc.getInputUser(user)
-                # Пробельное имя сохраняем буквально для text-mention entity.
                 entries.append((uid, uname, name,
                                 bool(user.bot or user.deleted)))
-            members, self_filter_ate_all = pick_members(entries, me)
-            if not MentionAllPlugin._diag_done:
-                MentionAllPlugin._diag_done = True
-                # одна строка правды о том, что реально пришло с устройства
-                self._journal_tell(
-                    "diag me %d n %d ids %s" % (
-                        me, len(entries),
-                        " ".join("%d:%d" % (e[0], 1 if e[1] else 0)
-                                 for e in entries[:4])))
-            if self_filter_ate_all:
-                # сравнение id в этом клиенте врёт и «это я» съедает весь
-                # список (1.1.3 на устройстве: получено 5, осталось 0).
-                # Упомянуть себя безобиднее, чем не упомянуть никого.
-                self._journal_tell(
-                    "self_filter_all me %d ids %s"
-                    % (me, " ".join(str(e[0]) for e in entries[:3])))
+            members, _ = pick_members(entries, me)
 
             limit = self._limit()
-            new_text, spans = build_mentions(text, members, limit)
+            unnamed = self._text("Unnamed", "Без имени")
+            new_text, spans = build_mentions(text, members, limit, unnamed)
             if not spans or not new_text.strip():
-                self._fail(account, params,
-                           "некого упоминать: получено %d, отобрано %d, "
-                           "лимит %d" % (len(users), len(members), limit),
-                           field, text, tag="no_members")
+                self._fail(
+                    account, params,
+                    self._text(
+                        "no one to mention: fetched %d, selected %d, limit %d",
+                        "некого упоминать: получено %d, отобрано %d, лимит %d")
+                    % (len(users), len(members), limit),
+                    field, text, tag="no_members")
                 return
             self._members[(account, int(params.peer))] = (
                 time.monotonic(), members, input_users)
-            self.log("mention-all: %d mentions, message length %d"
-                     % (len(spans), utf16len(new_text)))
-            # Переотправка снова проходит хук — кэш тёплый, и там сработает
-            # MODIFY: текст и entities уйдут одним штатным вызовом клиента
             self._resend(account, params)
         except Exception as exc:
-            self._fail(account, params, "сборка упоминаний: %r" % (exc,),
-                       field, text, tag="build")
+            self._fail(
+                account, params,
+                self._text("mention build failed: %r",
+                           "сборка упоминаний: %r") % (exc,),
+                field, text, tag="build")
 
     def _fail(self, account: int, params: Any, reason: str,
               field: Optional[str] = None, text: Optional[str] = None,
               tag: str = "fail"):
-        """Сбой: показать причину один раз и отправить без повторного входа."""
         self.log("mention-all FAIL: " + reason)
-        # tag — латиницей: кириллицу журнал не примет (см. _journal_tell)
         self._journal_tell("%s %s" % (tag, reason))
-        # диалог, а не бюллетень: остаётся на экране, пока пользователь не
-        # закроет — текст ошибки теперь реально можно прочитать
         self._alert("Mention All", reason + "\n\n" + self._check_report())
         if field is not None and text is not None:
-            # защёлка + вырезанный триггер: повторный хук не должен снова
-            # уйти в тот же сбой (1.0.1 циклил тут бесконечными бюллетенями)
             self._recent_fail[(int(params.peer), text)] = time.monotonic()
-        self._resend(account, params, field, text)  # не теряем сообщение
+        self._resend(account, params, field, text)
 
     def _journal_tell(self, text: str):
-        """Причину сбоя — в журнал активности: его стабильно смотрят и
-        скринят, в отличие от диалога. Кириллица в имени модуля недопустима,
-        поэтому в журнал попадает только латинская часть — ASCII-тег из
-        _fail и числа; русский текст причины остаётся в диалоге.
-        shortcut: хак через импорт-событие audit-гейта, убрать, когда ошибки уйдут."""
+        """Record an ASCII failure tag in the plugin activity journal.
+        shortcut: relies on the import-audit log; drop once error reporting API exists."""
         safe = re.sub(r"[^0-9A-Za-z]+", "_", str(text)).strip("_")[:120]
         if not safe:
             return
         try:
             __import__("mention_all_error_%s" % safe)
         except Exception:
-            pass  # ImportError и есть: событие в журнал пишется до резолва
+            pass
 
     def _resend(self, account: int, params: Any, field: Optional[str] = None,
                 text: Optional[str] = None, entities: Any = None):
-        """Переотправка тем же публичным sendMessage(params), каким ходит
-        клиент. Вызов снова проходит хук: если кэш участников тёплый, там
-        сработает MODIFY и entities уйдут штатно; если нет — текст уйдёт
-        хотя бы без упоминаний, но никогда пустым."""
         from android_utils import run_on_ui_thread
         from client_utils import get_send_messages_helper
 
@@ -649,22 +769,18 @@ class MentionAllPlugin(BasePlugin):
                 if entities is not None and entities.size() > 0:
                     params.entities = entities
             if field == "message" and not (params.message or "").strip():
-                self._journal_tell("skip_empty_message")
                 return
             helper.sendMessage(params)
-            self._journal_tell("resent len %d" % len(
-                str(getattr(params, field or "message") or "")))
 
         run_on_ui_thread(go)
 
     def _alert(self, title: str, message: str):
-        """Диалог: не исчезает сам, текст можно прочитать и снять скриншот."""
         try:
             from ui.alert import AlertDialogBuilder
             builder = AlertDialogBuilder()
             builder.set_title(title)
             builder.set_message(message)
-            builder.set_positive_button("Ок")
+            builder.set_positive_button(self._text("OK", "Ок"))
             builder.show()
         except Exception as exc:
             self.log("alert failed (%r): %s" % (exc, message))
