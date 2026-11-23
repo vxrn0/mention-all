@@ -5,10 +5,10 @@ host: **exteraGram**, **exteraless**, **AyuGram**. Typing `@all` in a group
 replaces the token with a text mention of every member; Telegram itself has
 no such feature.
 
-Verified against the exteraless engine sources (hook contract, permission
-gates, the `SendMessageParams.entities` path); nobody has run it on a phone.
-exteraGram and AyuGram use the same plugin API and are supported targets,
-treat them as unverified.
+Verified against the exteraless engine sources (message and Java hook
+contracts, permission gates, the `SendMessageParams.entities` path); nobody
+has run it on a phone. exteraGram and AyuGram use the same plugin API and are
+supported targets, treat them as unverified.
 
 Plugin API (hooks, permissions, mention entities, UTF-16 offsets):
 [`docs/plugin-api.md`](docs/plugin-api.md).
@@ -45,4 +45,4 @@ python3 scripts/package_release.py --output-dir dist
   module-level functions and is covered by `tests/test_plugin.py`; tests stub
   the SDK modules, they never import Chaquopy.
 - `__permissions__` must match real usage — it is shown to the user on the
-  install sheet: currently `messages.send` + `network`.
+  install sheet: `messages.send` + `network` + `hooks`.

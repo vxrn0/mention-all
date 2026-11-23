@@ -53,15 +53,24 @@ class ArrayList(list):
     def size(self):
         return len(self)
 
-    def add(self, item):
-        self.append(item)
+    def add(self, *args):
+        if len(args) == 1:
+            self.append(args[0])
+        else:
+            self.insert(args[0], args[1])
 
     def get(self, i):
         return self[i]
 
 
+class WeakHashMap(dict):
+    def put(self, key, value):
+        self[key] = value
+
+
 java_util = types.ModuleType("java.util")
 java_util.ArrayList = ArrayList
+java_util.WeakHashMap = WeakHashMap
 
 
 class _Mention:
@@ -351,5 +360,101 @@ assert spans == [(0, 3, 11, None), (4, 2, 22, None)], spans
 
 # обычное имя остаётся как было
 assert build("@all", [(1, None, "Ann")], 100)[0] == "Ann"
+
+# ---- @all mention autocomplete ----
+
+suggestion = mod.is_all_suggestion_prefix
+assert suggestion("@")
+assert suggestion("hello @a")
+assert suggestion("hello @AlL")
+assert not suggestion("hello @@all")
+assert not suggestion("hello@all")
+assert not suggestion("@allx")
+assert not suggestion("@xyz")
+
+
+class FakeChat:
+    channel = False
+    megagroup = False
+
+
+class FakeFragment:
+    def getCurrentChat(self):
+        return self.chat
+
+
+class FakeAdapter:
+    def __init__(self):
+        self.parentFragment = FakeFragment()
+        self.parentFragment.chat = FakeChat()
+        self.results = ArrayList()
+
+    def getFoundContextBot(self):
+        return None
+
+    def getItem(self, position):
+        return self.results[position] if position < len(self.results) else None
+
+    def isBotContext(self):
+        return False
+
+    def isStickers(self):
+        return False
+
+    def isBotCommands(self):
+        return False
+
+
+class FakeHookParam:
+    def __init__(self, adapter, args=(), result=None):
+        self.thisObject = adapter
+        self.args = list(args)
+        self.result = result
+
+
+class FakeMentionCell:
+    def setText(self, text):
+        self.text = text
+
+
+class FakeHolder:
+    def __init__(self):
+        self.itemView = FakeMentionCell()
+
+
+autocomplete = mod.MentionAllPlugin()
+adapter = FakeAdapter()
+autocomplete._before_mention_search(
+    FakeHookParam(adapter, ("hello @al", len("hello @al"), None, False, False)))
+results = ArrayList(["Alice"])
+adapter.results = results
+autocomplete._before_show_users_result(
+    FakeHookParam(adapter, (results, {}, True)))
+assert results == ["@all", "Alice"]
+autocomplete._before_show_users_result(
+    FakeHookParam(adapter, (results, {}, True)))
+assert results == ["@all", "Alice"]  # repeated updates don't duplicate it
+
+holder = FakeHolder()
+bind = FakeHookParam(adapter, (holder, 0))
+autocomplete._before_mention_bind(bind)
+assert holder.itemView.text == "@all — mention everyone"
+assert bind.result is None
+bind = FakeHookParam(adapter, (holder, 2), result="untouched")
+autocomplete._before_mention_bind(bind)
+assert bind.result == "untouched"
+
+# Non-matching input and broadcast channels never get the synthetic row.
+autocomplete._before_mention_search(
+    FakeHookParam(adapter, ("hello @allx", len("hello @allx"), None, False, False)))
+assert not autocomplete._has_all_suggestion(adapter)
+results = ArrayList(["Alice"])
+autocomplete._before_show_users_result(
+    FakeHookParam(adapter, (results, {}, True)))
+assert results == ["Alice"]
+adapter.parentFragment.chat.channel = True
+autocomplete._before_mention_search(
+    FakeHookParam(adapter, ("@all", 4, None, False, False)))
+assert not autocomplete._has_all_suggestion(adapter)
 
 print("ok")

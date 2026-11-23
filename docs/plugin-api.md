@@ -10,9 +10,18 @@ exteraless and AyuGram; a client-specific API is the exception, not the rule.
   host parses them with AST; never compute them.
 - **Permissions (exteraless).** Declared keys gate the plugin at registration
   points: the outgoing-message hook needs `messages.send`, raw TL requests via
-  `client_utils.send_request` need `network`. A request without a grant is
-  silently dropped and lands in the plugin activity log — declare what you use,
-  or the plugin loads but does nothing.
+  `client_utils.send_request` need `network`, and Java method hooks need
+  `hooks`. This last permission is powerful and is shown on the install sheet.
+  A request without a grant is silently dropped and lands in the plugin
+  activity log — declare what you use, or the plugin loads but does nothing.
+- **Java method hooks (exteraless).** `BasePlugin.hook_method((class_name,
+  method_name), before=callback, after=callback)` accepts a dotted class name;
+  callbacks receive a `MethodHookParam` (`thisObject`, `args`, `result`) and
+  `param.setResult(...)` can replace or skip the original call. The
+  `MentionsAdapter` autocomplete inserts a `String` into its username results
+  and renders it in the normal mention cell; selecting it follows
+  `ChatActivity`'s normal text-replacement path. This hook surface is verified
+  only against exteraless.
 - **Outgoing messages.** `on_send_message_hook(account, params)` fires from
   `SendMessagesHelper.sendMessage` with the live
   `SendMessagesHelper.SendMessageParams`. Return

@@ -10,6 +10,7 @@ a username, via text-mention entities. Telegram itself has no such feature.
 
 - `@all` as a standalone word, case-insensitive; `@allxxx` and `@@all` are
   left alone.
+- `@all` is offered as a selectable row while typing a matching `@` mention.
 - Works in basic groups and supergroups, in message text and media captions.
 - Members with a username are mentioned as `@username`; the rest get a
   text mention by user ID. Names made of spaces stay spaces as the clickable
@@ -24,14 +25,17 @@ a username, via text-mention entities. Telegram itself has no such feature.
 - exteraGram and exteraless `>= 12.10.6` — same plugin API
 - Plugin SDK `>= 1.4.5.3`
 - Permissions: `messages.send` (outgoing-message hook, resend), `network`
-  (TL request for the member list)
-- Version `1.2.4`
+  (TL request for the member list), and `hooks` (mention autocomplete).
+  `hooks` is a powerful permission.
+- The autocomplete hook is verified against exteraless sources; other clients
+  are not verified.
+- Version `1.3.0`
 
 ## Install
 
 1. Settings → Plugins: enable the plugin engine and developer mode.
 2. Import `plugin/mention_all.plugin` (or just open the file from a chat).
-3. Confirm the two permissions on the install sheet.
+3. Confirm the requested permissions on the install sheet.
 
 ## License
 

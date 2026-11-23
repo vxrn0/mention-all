@@ -21,7 +21,7 @@ FIELDS = (
     "__sdk_version__",
     "__permissions__",
 )
-REQUIRED_PERMISSIONS = ("messages.send", "network")
+REQUIRED_PERMISSIONS = ("messages.send", "network", "hooks")
 
 
 def fail(message):
