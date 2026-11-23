@@ -1,5 +1,7 @@
 # Mention All
 
+[![Built with OpenCode](https://opencode.ai/brand/badges/opencode-built-with-f-light-20.svg)](https://opencode.ai)
+
 [Русская версия](ru/README.ru.md)
 
 Mention All pings everyone in a group chat. Type `@all` and send: the plugin
