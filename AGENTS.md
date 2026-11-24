@@ -11,7 +11,8 @@ has run it on a phone. exteraGram and AyuGram use the same plugin API and are
 supported targets, treat them as unverified.
 
 Plugin API (hooks, permissions, mention entities, UTF-16 offsets):
-[`docs/plugin-api.md`](docs/plugin-api.md).
+[`docs/plugin-api.md`](docs/plugin-api.md). Load the `exteraless-plugin-dev`
+skill (`.agents/skills/exteraless-plugin-dev/SKILL.md`) before editing code.
 
 ## Layout
 
