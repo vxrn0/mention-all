@@ -22,8 +22,9 @@ skill (`.agents/skills/exteraless-plugin-dev/SKILL.md`) before editing code.
 | `scripts/package_release.py` | Validates metadata, builds `dist/MentionAll-<version>.plugin` + `SHA256SUMS`. |
 | `tests/test_plugin.py` | Host-side stubs for mention building, offsets, hook routing. |
 | `docs/plugin-api.md` | How plugins for this host family are written. |
+| `SECURITY.md` | Supported versions, trusted builds, vulnerability reporting. |
 | `.github/` | CI workflow. |
-| `ru/` | Russian README and license; English originals stay at the root. |
+| `ru/` | Russian README, license and security policy; English originals stay at the root. |
 
 ## Commands
 
