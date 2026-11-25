@@ -43,6 +43,10 @@ a username, via text-mention entities — while keeping the message displayed as
 2. Import `plugin/mention_all.plugin` (or just open the file from a chat).
 3. Confirm the requested permissions on the install sheet.
 
+## Updates
+
+New releases are posted in [@vxrn0](https://t.me/vxrn0).
+
 ## License
 
 MIT — see [LICENSE](LICENSE.md).
