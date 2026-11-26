@@ -23,16 +23,16 @@ fixes. Update to the latest release before reporting a problem.
 - Verify the asset against `SHA256SUMS` from the same release.
 - Review the permissions shown on the install sheet: `messages.send` and
   `network` are needed to fetch members and send mentions; `hooks` enables the
-  `@all` autocomplete and local display masking. `hooks` is a powerful
-  permission — treat a plugin asking for more as suspicious.
+  `@all` autocomplete and local masking of sent messages, including chat-list
+  and topic previews. `hooks` is a powerful permission — treat a plugin asking
+  for more as suspicious.
 - The plugin updates only when you install a new file; it does not download
   code by itself.
 
 ## Reporting a vulnerability
 
-Prefer GitHub's private "Report a vulnerability" on the repository Security
-tab. Alternatively, email `vxrn@tutamail.com` or write to
-[@vxrn0](https://t.me/vxrn0) on Telegram.
+Report privately via GitHub's "Report a vulnerability" on the repository
+Security tab.
 
 Do not open a public issue with exploit details. Include the plugin version,
 client and client version, steps to reproduce, and any relevant log. This is a

@@ -28,13 +28,14 @@ a username, via text-mention entities — while keeping the message displayed as
 
 ## Compatibility
 
-- exteraGram and exteraless `>= 12.10.6` — same plugin API
+- exteraless `>= 12.10.6` — verified target
+- exteraGram and AyuGram use the same plugin API and are supported targets,
+  but were not tested
 - Plugin SDK `>= 1.4.5.3`
 - Permissions: `messages.send` (outgoing-message hook, resend), `network`
   (TL request for the member list), and `hooks` (`@all` autocomplete and local
-  display masking). `hooks` is a powerful permission.
-- The autocomplete and masking hooks are verified against exteraless sources;
-  exteraGram and AyuGram are not verified.
+  masking in messages, chat-list and topic previews). `hooks` is a powerful
+  permission.
 - Version `1.4.1`
 
 ## Install
