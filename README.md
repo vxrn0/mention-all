@@ -28,9 +28,9 @@ a username, via text-mention entities — while keeping the message displayed as
 
 ## Compatibility
 
-- exteraless `>= 12.10.6` — verified target
-- exteraGram and AyuGram use the same plugin API and are supported targets,
-  but were not tested
+- exteraless `>= 12.10.6` — the only client where Mention All was tested
+- exteraGram and AyuGram share the same plugin API but were not tested; treat
+  them as unverified
 - Plugin SDK `>= 1.4.5.3`
 - Permissions: `messages.send` (outgoing-message hook, resend), `network`
   (TL request for the member list), and `hooks` (`@all` autocomplete and local
