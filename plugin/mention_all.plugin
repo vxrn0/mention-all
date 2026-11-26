@@ -15,7 +15,7 @@ __id__ = "mention_all"
 __name__ = "Mention All"
 __description__ = "Type @all in a group to mention every member."
 __author__ = "@vxrn0"
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 __icon__ = "exteraPlugins/1"
 __category__ = "chats"
 __app_version__ = ">=12.10.6"
@@ -185,6 +185,9 @@ class MentionAllPlugin(BasePlugin):
             ("setType", None, self._after_message_set_type),
             ("generateLayout", self._before_message_layout, self._after_message_layout),
             ("generateCaption", self._before_message_caption, self._after_message_caption),
+        ))
+        self._register_hook_group("dialog preview masking", "org.telegram.ui.Cells.DialogCell", (
+            ("getMessageStringFormatted", self._before_dialog_preview, self._after_dialog_preview),
         ))
         self.log("mention-all loaded")
 
@@ -428,6 +431,35 @@ class MentionAllPlugin(BasePlugin):
             owner.entities = entities
         except Exception as exc:
             self.log("mask caption after failed: %s" % exc)
+
+    def _before_dialog_preview(self, param):
+        try:
+            msg = param.thisObject.getMessage()
+        except Exception:
+            return
+        original = self._lookup_mask(msg)
+        if original is None:
+            return
+        try:
+            from java.util import ArrayList
+            owner = msg.messageOwner
+            self._mask_stack("dialog_stack").append(
+                (param.thisObject, owner, owner.message, owner.entities))
+            owner.message = original
+            owner.entities = ArrayList()
+        except Exception as exc:
+            self.log("mask dialog preview before failed: %s" % exc)
+
+    def _after_dialog_preview(self, param):
+        stack = self._mask_stack("dialog_stack")
+        if not stack or stack[-1][0] is not param.thisObject:
+            return
+        _, owner, message, entities = stack.pop()
+        try:
+            owner.message = message
+            owner.entities = entities
+        except Exception as exc:
+            self.log("mask dialog preview after failed: %s" % exc)
 
     # ---- settings and self-test ----
 

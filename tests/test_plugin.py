@@ -397,6 +397,25 @@ incoming = FakeMessageObject(-123, "hi @ann_x Bob Cara", out=False)
 plugin._after_message_set_type(FakeHookParam(incoming))
 assert incoming.messageText == "hi @ann_x Bob Cara"
 
+# DialogCell preview hook swaps messageOwner.message/entities and restores both.
+class FakeDialogCell:
+    def __init__(self, msg):
+        self._msg = msg
+
+    def getMessage(self):
+        return self._msg
+
+
+dlg_msg = FakeMessageObject(-123, "hi @ann_x Bob Cara", out=True)
+dlg_entities = dlg_msg.messageOwner.entities
+dlg_cell = FakeDialogCell(dlg_msg)
+plugin._before_dialog_preview(FakeHookParam(dlg_cell))
+assert dlg_msg.messageOwner.message == "hi @all"
+assert dlg_msg.messageOwner.entities.size() == 0
+plugin._after_dialog_preview(FakeHookParam(dlg_cell))
+assert dlg_msg.messageOwner.message == "hi @ann_x Bob Cara"
+assert dlg_msg.messageOwner.entities is dlg_entities
+
 # Persisted masked map reloads cleanly after restart.
 saved_json = plugin._settings[mod._MASK_KEY]
 assert isinstance(json.loads(saved_json), dict)

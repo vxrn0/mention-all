@@ -35,7 +35,7 @@ a username, via text-mention entities — while keeping the message displayed as
   display masking). `hooks` is a powerful permission.
 - The autocomplete and masking hooks are verified against exteraless sources;
   exteraGram and AyuGram are not verified.
-- Version `1.4.0`
+- Version `1.4.1`
 
 ## Install
 
