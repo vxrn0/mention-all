@@ -1,4 +1,8 @@
+![Mention All](../.github/preview.webp)
+
 # Mention All
+
+[![Built with OpenCode](https://opencode.ai/brand/badges/opencode-built-with-f-light-20.svg)](https://opencode.ai)
 
 [English version](../README.md)
 
