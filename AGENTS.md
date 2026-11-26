@@ -5,9 +5,9 @@ host: **exteraGram**, **exteraless**, **AyuGram**. Typing `@all` in a group
 replaces the token with a text mention of every member; Telegram itself has
 no such feature.
 
-Tested only in exteraless; the hooks and permissions are also verified against
-the exteraless engine sources. exteraGram and AyuGram use the same plugin API
-but were never run; treat their support as unverified.
+Supported and tested only in exteraless; the hooks and permissions are also
+verified against the exteraless engine sources. exteraGram is known not to work
+(unsupported); AyuGram is untested (unverified).
 
 Plugin API (hooks, permissions, mention entities, UTF-16 offsets):
 [`docs/plugin-api.md`](docs/plugin-api.md). Load the `exteraless-plugin-dev`
